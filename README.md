@@ -11,7 +11,7 @@ Development paused due to lack of time until June 2026 (JEE Advanced). PRs and i
 
 <div align="center" style="margin: 20px 0px;">
 <a href="https://github.com/kavishdevar/librepods/releases/latest">
-  <img src="https://img.shields.io/github/downloads/kavishdevar/librepods/total?label=GitHub Downloads" />
+  <img src="https://img.shields.io/github/downloads/kavishdevar/librepods/total?label=GitHub%20Downloads" />
 </a>
 <a href="https://github.com/kavishdevar/librepods/actions/workflows/ci-android.yml">
   <img src="https://github.com/kavishdevar/librepods/actions/workflows/ci-android.yml/badge.svg" />
@@ -87,7 +87,7 @@ You can also try the latest build of the new version from the [GitHub Actions ar
 | Transparency Mode customization                             | 🔴     | ⚪       |
 | Multi-device connectivity (Bluetooth Multipoint; 2 devices only) | ⚪     | ⚪       |
 | <details><summary>Other accessibility configs (click to expand)</summary><ul><li>Press speed</li><li>Press and Hold duration</li><li>Noise Cancellation with single AirPod</li><li>Volume control on swipe</li><li>Volume swipe speed</li></ul></details>       | 🔴     | ✅       |
-| <details><summary>Other general configs</summary><ul><li>Press and Hold to cycle between listening modes / invoke digital assistant (invoking digital assistant needs a recent firmware)</li><li>Configure call controls</li><li>Personalized volume</li><li>Loud Sound Reduction (needs <a href="#vendorid-spoofing">VendorID spoofing</a>)</li><li>Microphone side</li><li>Pause media when falling asleep (needs a recent firmware)</li><li>Enable <code>Off listening mode</code> to switch to <code>Off</code></li></ul></details>                   | 🔴     | ✅       |
+| <details><summary>Other general configs</summary><ul><li>Press and Hold to cycle between listening modes/invoke digital assistant (invoking digital assistant needs a recent firmware)</li><li>Configure call controls</li><li>Personalized volume</li><li>Loud Sound Reduction (needs <a href="#vendorid-spoofing">VendorID spoofing</a>)</li><li>Microphone side</li><li>Pause media when falling asleep (needs a recent firmware)</li><li>Enable <code>Off listening mode</code> to switch to <code>Off</code></li></ul></details>                   | 🔴     | ✅       |
 | [Head-tracked Spatial Audio](#spatial-audio)                | ❓     | ❓       |
 | [Heart Rate Monitoring](#heart-rate-monitoring)             | ⛔     | 🔴       |
 | [Find My](#find-my)                                         | ❓     | ❓       |
