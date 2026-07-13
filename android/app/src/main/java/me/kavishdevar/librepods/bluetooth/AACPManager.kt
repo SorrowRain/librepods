@@ -242,6 +242,7 @@ class AACPManager {
         fun onOwnershipChangeReceived(owns: Boolean)
         fun onConnectedDevicesReceived(connectedDevices: List<ConnectedDevice>)
         fun onOwnershipToFalseRequest(sender: String, reasonReverseTapped: Boolean)
+        fun onRemoteStreamingStateChanged(sender: String, isStreaming: Boolean)
         fun onShowNearbyUI(sender: String)
         fun onHeadphoneAccommodationReceived(eqData: FloatArray)
         fun onCustomEqReceived(customEq: CustomEq)
@@ -547,6 +548,14 @@ class AACPManager {
                     TAG,
                     "Smart Routing Response from $sender: $packetString, type: ${connectedDevices.find { it.mac == sender }?.type}"
                 )
+                if (packetString.contains("hostStreamingState")) {
+                    when {
+                        packetString.contains("YES") ->
+                            callback?.onRemoteStreamingStateChanged(sender, true)
+                        packetString.contains("NO") ->
+                            callback?.onRemoteStreamingStateChanged(sender, false)
+                    }
+                }
                 if (packetString.contains("SetOwnershipToFalse")) {
                     callback?.onOwnershipToFalseRequest(
                         sender,
@@ -1137,6 +1146,7 @@ class AACPManager {
     }
 
     @OptIn(ExperimentalStdlibApi::class)
+    @Synchronized
     fun sendPacket(packet: ByteArray): Boolean {
         try {
             Log.d(TAG, "Sending packet: ${packet.joinToString(" ") { "%02X".format(it) }}")
