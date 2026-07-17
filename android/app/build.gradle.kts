@@ -1,6 +1,6 @@
 import java.util.Properties
 
-val appVersionName = "1.0.1"
+val appVersionName = "1.0.2"
 
 plugins {
     alias(libs.plugins.android.application)
@@ -49,7 +49,7 @@ android {
     defaultConfig {
         applicationId = "me.kavishdevar.librepods"
         targetSdk = 37
-        versionCode = 67
+        versionCode = 68
         versionName = appVersionName
     }
     buildTypes {
@@ -171,6 +171,43 @@ aboutLibraries {
 
 val rootModuleDir = rootProject.file("../root-module-manual")
 val releaseDir = rootProject.file("../release")
+val headTrackerSource = rootProject.file("tools/headtracker-uhid/headtracker_uhid.cpp")
+val headTrackerOutput = layout.buildDirectory.file(
+    "outputs/headtracker/arm64-v8a/librepods-headtracker"
+)
+
+val ndkHostTag = when {
+    System.getProperty("os.name").startsWith("Mac", ignoreCase = true) -> "darwin-x86_64"
+    System.getProperty("os.name").startsWith("Windows", ignoreCase = true) -> "windows-x86_64"
+    else -> "linux-x86_64"
+}
+
+val buildHeadTrackerHelper = tasks.register<Exec>("buildHeadTrackerHelper") {
+    val compiler = androidComponents.sdkComponents.ndkDirectory.get().asFile.resolve(
+        "toolchains/llvm/prebuilt/$ndkHostTag/bin/aarch64-linux-android33-clang++"
+    )
+
+    inputs.file(headTrackerSource)
+    inputs.file(compiler)
+    outputs.file(headTrackerOutput)
+
+    headTrackerOutput.get().asFile.parentFile.mkdirs()
+
+    commandLine(
+        compiler,
+        "-std=c++20",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-static-libstdc++",
+        "-Wl,--gc-sections",
+        "-Wl,--strip-all",
+        headTrackerSource,
+        "-o",
+        headTrackerOutput.get().asFile
+    )
+}
 
 fun cap(s: String) = s.replaceFirstChar { it.uppercase() }
 
@@ -181,7 +218,7 @@ fun registerRootModuleZipTask(
 ) = tasks.register<Zip>(name) {
 
     val variantTask = "assemble${cap(flavor)}${cap(buildType)}"
-    dependsOn(variantTask)
+    dependsOn(variantTask, buildHeadTrackerHelper)
 
     val apkPath = "outputs/apk/$flavor/$buildType/app-$flavor-$buildType.apk"
 
@@ -192,6 +229,13 @@ fun registerRootModuleZipTask(
     from(layout.buildDirectory.file(apkPath)) {
         into("system/priv-app/LibrePods")
         rename { "LibrePods.apk" }
+    }
+
+    from(headTrackerOutput) {
+        into("system/bin")
+        filePermissions {
+            unix("rwxr-xr-x")
+        }
     }
 
     delete(layout.buildDirectory.dir("outputs/rootModuleZips"))

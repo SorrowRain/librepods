@@ -241,4 +241,15 @@
     <string name="bypass_compatiblity_check_confirmation">你確定你的裝置原生支援或已啟用 Xposed 模組嗎？</string>
     <string name="not_supported">不支援</string>
     <string name="check_the_repository_for_more_info">請查看儲存庫以獲取更多資訊。</string>
+    <string name="spatial_audio">空間音訊</string>
+    <string name="spatial_audio_mode_description">選擇關閉空間音訊、讓聲場隨頭部移動，或透過頭部追蹤將聲場錨定在手機方向。</string>
+    <string name="spatial_audio_off">關閉</string>
+    <string name="spatial_audio_off_description">關閉空間音訊</string>
+    <string name="spatial_audio_fixed">固定</string>
+    <string name="spatial_audio_fixed_description">開啟空間音訊但不追蹤頭部，聲場會隨頭部一起移動。</string>
+    <string name="spatial_audio_head_tracking">頭部追蹤</string>
+    <string name="spatial_audio_description">轉動頭部時讓聲場保持錨定在手機方向。需要 KSU 模組。</string>
+    <string name="spatial_audio_checking">正在檢查 Root、UHID 和 Spatializer 支援…</string>
+    <string name="spatial_audio_helper_unavailable">Root 頭部追蹤元件或 /dev/uhid 無法使用。</string>
+    <string name="spatial_audio_platform_unavailable">目前 Android 音訊系統沒有相容的 Spatializer。</string>
 </resources>

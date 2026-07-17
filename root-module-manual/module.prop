@@ -1,7 +1,6 @@
 id=librepods
 name=LibrePods
-version=v0.2.6
-versionCode=46
+version=v1.0.2
+versionCode=68
 author=@kavishdevar
-description=Installs LibrePods as a system app for granting BLUETOOTH_PRIVILEGED and MODIFY_PHONE_STATE permission for better integraion with android.
-updateJson=https://raw.githubusercontent.com/kavishdevar/librepods/main/extras/update_nonpatch.json
+description=Installs LibrePods as a system app and provides the root head-tracker helper used for Android spatial audio integration.

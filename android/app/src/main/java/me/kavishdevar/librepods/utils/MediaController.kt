@@ -104,6 +104,10 @@ object MediaController {
             val isActive = audioManager.isMusicActive
             Log.d("MediaController", "Playback config changed, iPausedTheMedia: $iPausedTheMedia, isActive: $isActive, pausedForOtherDevice: $pausedForOtherDevice, lastKnownIsMusicActive: $lastKnownIsMusicActive")
 
+            if (isActive && lastKnownIsMusicActive != true) {
+                ServiceManager.getService()?.onLocalMediaPlaybackStarting()
+            }
+
             if (!isActive && lastPlayWithReplay && now - lastPlayTime < 2500L) {
                 Log.d("MediaController", "Music paused shortly after play with replay; retrying play")
                 lastPlayWithReplay = false

@@ -215,4 +215,15 @@
     <string name="listening_mode_transparency_description">允许外部声音进入</string>
     <string name="listening_mode_adaptive_description">动态调整外部噪音</string>
     <string name="listening_mode_noise_cancellation_description">阻隔外部声音</string>
+    <string name="spatial_audio">空间音频</string>
+    <string name="spatial_audio_mode_description">选择关闭空间音频、让声场随头部移动，或通过头部追踪将声场锚定在手机方向。</string>
+    <string name="spatial_audio_off">关闭</string>
+    <string name="spatial_audio_off_description">关闭空间音频</string>
+    <string name="spatial_audio_fixed">固定</string>
+    <string name="spatial_audio_fixed_description">开启空间音频但不追踪头部，声场会随头部一起移动。</string>
+    <string name="spatial_audio_head_tracking">头部追踪</string>
+    <string name="spatial_audio_description">转动头部时让声场保持锚定在手机方向。需要 KSU 模块。</string>
+    <string name="spatial_audio_checking">正在检查 Root、UHID 和 Spatializer 支持…</string>
+    <string name="spatial_audio_helper_unavailable">Root 头部追踪组件或 /dev/uhid 不可用。</string>
+    <string name="spatial_audio_platform_unavailable">当前 Android 音频系统没有兼容的 Spatializer。</string>
 </resources>

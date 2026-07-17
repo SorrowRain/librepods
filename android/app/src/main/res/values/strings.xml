@@ -294,4 +294,15 @@
     <string name="permissions">Permissions</string>
     <string name="privacy_policy">Privacy Policy</string>
     <string name="i_agree">I agree</string>
+    <string name="spatial_audio">Spatial Audio</string>
+    <string name="spatial_audio_mode_description">Choose whether spatial audio is off, fixed to your head, or anchored to the phone with head tracking.</string>
+    <string name="spatial_audio_off">Off</string>
+    <string name="spatial_audio_off_description">Turns off spatial audio.</string>
+    <string name="spatial_audio_fixed">Fixed</string>
+    <string name="spatial_audio_fixed_description">Enables spatial audio without head tracking. The sound stage moves with your head.</string>
+    <string name="spatial_audio_head_tracking">Head tracking</string>
+    <string name="spatial_audio_description">Keeps the sound stage anchored to the phone while you move your head. Requires the KSU module.</string>
+    <string name="spatial_audio_checking">Checking Root, UHID and Spatializer support…</string>
+    <string name="spatial_audio_helper_unavailable">The Root head-tracker helper or /dev/uhid is unavailable.</string>
+    <string name="spatial_audio_platform_unavailable">This Android audio implementation does not expose a compatible Spatializer.</string>
 </resources>

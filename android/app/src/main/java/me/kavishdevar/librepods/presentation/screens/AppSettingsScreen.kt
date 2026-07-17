@@ -95,6 +95,7 @@ import me.kavishdevar.librepods.presentation.theme.DesignSystem
 import me.kavishdevar.librepods.presentation.theme.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.theme.MaterialTypography
 import me.kavishdevar.librepods.presentation.viewmodel.AppSettingsViewModel
+import me.kavishdevar.librepods.utils.SpatialAudioMode
 import me.kavishdevar.librepods.utils.XposedState
 import java.util.concurrent.TimeUnit
 
@@ -340,6 +341,50 @@ fun AppSettingsScreen(
                     enabled = state.isPremium
                 )
             }
+
+            val spatialAudioControlsEnabled = state.spatialAudioCapabilityChecked &&
+                state.spatializerAvailable && !state.spatialAudioBusy
+            StyledList(
+                title = stringResource(R.string.spatial_audio),
+                description = when {
+                    state.spatialAudioBusy || !state.spatialAudioCapabilityChecked ->
+                        stringResource(R.string.spatial_audio_checking)
+                    !state.spatializerAvailable ->
+                        stringResource(R.string.spatial_audio_platform_unavailable)
+                    state.spatialAudioError != null -> state.spatialAudioError
+                    else -> stringResource(R.string.spatial_audio_mode_description)
+                }
+            ) {
+                StyledListItem(
+                    name = stringResource(R.string.spatial_audio_off),
+                    description = stringResource(R.string.spatial_audio_off_description),
+                    selected = state.spatialAudioMode == SpatialAudioMode.OFF,
+                    onClick = { viewModel.setSpatialAudioMode(SpatialAudioMode.OFF) },
+                    enabled = spatialAudioControlsEnabled
+                )
+                StyledListItem(
+                    name = stringResource(R.string.spatial_audio_fixed),
+                    description = stringResource(R.string.spatial_audio_fixed_description),
+                    selected = state.spatialAudioMode == SpatialAudioMode.FIXED,
+                    onClick = { viewModel.setSpatialAudioMode(SpatialAudioMode.FIXED) },
+                    enabled = spatialAudioControlsEnabled
+                )
+                StyledListItem(
+                    name = stringResource(R.string.spatial_audio_head_tracking),
+                    description = if (state.spatialAudioHelperAvailable) {
+                        stringResource(R.string.spatial_audio_description)
+                    } else {
+                        stringResource(R.string.spatial_audio_helper_unavailable)
+                    },
+                    selected = state.spatialAudioMode == SpatialAudioMode.HEAD_TRACKED,
+                    onClick = {
+                        viewModel.setSpatialAudioMode(SpatialAudioMode.HEAD_TRACKED)
+                    },
+                    enabled = spatialAudioControlsEnabled &&
+                        state.spatialAudioHelperAvailable
+                )
+            }
+            Spacer(modifier = Modifier.height(16.dp))
 
             StyledToggle(
                 title = stringResource(R.string.advanced_options), // shouldn't be here, but okay

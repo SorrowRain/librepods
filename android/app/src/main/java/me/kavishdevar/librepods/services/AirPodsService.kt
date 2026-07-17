@@ -75,12 +75,17 @@ import androidx.core.content.edit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.MainActivity
@@ -111,6 +116,10 @@ import me.kavishdevar.librepods.presentation.widgets.NoiseControlWidget
 import me.kavishdevar.librepods.utils.GestureDetector
 import me.kavishdevar.librepods.utils.HeadTracking
 import me.kavishdevar.librepods.utils.MediaController
+import me.kavishdevar.librepods.utils.RootHeadTrackerBridge
+import me.kavishdevar.librepods.utils.RootAvrcpVolumeController
+import me.kavishdevar.librepods.utils.RootSpatialAudioController
+import me.kavishdevar.librepods.utils.SpatialAudioMode
 import me.kavishdevar.librepods.utils.SystemApisUtils
 import me.kavishdevar.librepods.utils.SystemApisUtils.DEVICE_TYPE_UNTETHERED_HEADSET
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_COMPANION_APP
@@ -137,6 +146,9 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.time.Duration.Companion.milliseconds
 
 private const val TAG = "AirPodsService"
+private const val A2DP_DIRECT_VOLUME_RESYNC_DELAY_MS = 350L
+private const val A2DP_VOLUME_RESYNC_DEBOUNCE_MS = 1_000L
+private const val A2DP_VOLUME_PULSE_MS = 180L
 
 object ServiceManager {
     private var service: AirPodsService? = null
@@ -165,6 +177,16 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private var lastAudioSourceMac: String? = null
     private var lastAudioSourceType: AACPManager.Companion.AudioSourceType? = null
     private var lastAacpControlRefreshAt = 0L
+    private var lastA2dpVolumeResyncAt = 0L
+    private var a2dpVolumeResyncGeneration = 0
+    private var earlyA2dpVolumeResyncInFlight = false
+    private val spatialHeadTrackerBridge = RootHeadTrackerBridge()
+    private val rootAvrcpVolumeController by lazy { RootAvrcpVolumeController(this) }
+    private val spatialAudioController by lazy { RootSpatialAudioController(this) }
+    private val audioFeatureScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var isAirPodsA2dpPlaying = false
+    private var spatialAudioTransitionId = 0
+    private val spatialAudioTransitionMutex = Mutex()
 
     data class ServiceConfig(
         var deviceName: String = "AirPods",
@@ -697,6 +719,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 //                    }
 
                 } else if (intent?.action == AirPodsNotifications.AIRPODS_DISCONNECTED) {
+                    isAirPodsA2dpPlaying = false
+                    cancelPendingAirPodsAbsoluteVolumeResync("AACP disconnected")
+                    rootAvrcpVolumeController.cancel()
+                    updateSpatialAudioTracking("AACP disconnected")
                     device = null
 //                    isConnectedLocally = false
                     popupShown = false
@@ -755,6 +781,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             )
             registerReceiver(bluetoothReceiver, serviceIntentFilter)
         }
+
+        refreshCurrentA2dpPlaybackState("service startup")
 
         val bluetoothAdapter = getSystemService(BluetoothManager::class.java).adapter
 
@@ -940,7 +968,14 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             }
 
             override fun onOwnershipChangeReceived(owns: Boolean) {
-                if (!owns) {
+                if (owns) {
+                    scheduleAirPodsAbsoluteVolumeResync(
+                        "AACP ownership confirmed for this phone",
+                        delayMs = 0L
+                    )
+                } else {
+                    prewarmAirPodsAbsoluteVolumeResync("AACP ownership lost")
+                    cancelPendingAirPodsAbsoluteVolumeResync("AACP ownership lost")
                     MediaController.recentlyLostOwnership = true
                     Handler(Looper.getMainLooper()).postDelayed({
                         MediaController.recentlyLostOwnership = false
@@ -1096,7 +1131,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             @SuppressLint("NewApi")
             override fun onHeadTrackingReceived(headTracking: ByteArray) {
                 if (isHeadTrackingActive) {
-                    HeadTracking.processPacket(headTracking)
+                    HeadTracking.processPacket(headTracking)?.let(spatialHeadTrackerBridge::submit)
                     processHeadTrackingData(headTracking)
                 }
             }
@@ -1159,6 +1194,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     (previousMac != localMac || previousType == AACPManager.Companion.AudioSourceType.NONE)
                 ) {
                     refreshAacpControlSession("audio source returned to this phone")
+                    scheduleAirPodsAbsoluteVolumeResync(
+                        "audio source returned to this phone",
+                        delayMs = 0L
+                    )
                 }
             }
 
@@ -1516,6 +1555,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 preferences.getBoolean(key, true)
 
             "head_gestures" -> config.headGestures = preferences.getBoolean(key, true)
+            "spatial_audio_enabled", SpatialAudioMode.PREFERENCE_KEY -> {
+                updateSpatialAudioTracking("setting changed")
+            }
             "disconnect_when_not_wearing" -> config.disconnectWhenNotWearing =
                 preferences.getBoolean(key, false)
 
@@ -2457,16 +2499,30 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         intent.putExtra("device", bluetoothDevice)
                         context?.sendBroadcast(intent)
                     }
+                } else if (BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED == action) {
+                    val state = intent.getIntExtra(
+                        BluetoothProfile.EXTRA_STATE,
+                        BluetoothProfile.STATE_DISCONNECTED
+                    )
+                    val airPodsMac = this@AirPodsService.device?.address ?: macAddress
+                    val isCurrentAirPods = airPodsMac.isNotEmpty() &&
+                        bluetoothDevice.address.equals(airPodsMac, ignoreCase = true)
+                    if (isCurrentAirPods && state == BluetoothProfile.STATE_CONNECTED) {
+                        refreshCurrentA2dpPlaybackState("AirPods A2DP connected")
+                    } else if (isCurrentAirPods && state == BluetoothProfile.STATE_DISCONNECTED) {
+                        isAirPodsA2dpPlaying = false
+                        cancelPendingAirPodsAbsoluteVolumeResync("AirPods A2DP disconnected")
+                        updateSpatialAudioTracking("AirPods A2DP disconnected")
+                    }
                 } else if (BluetoothA2dp.ACTION_PLAYING_STATE_CHANGED == action) {
                     val state = intent.getIntExtra(
                         BluetoothProfile.EXTRA_STATE, BluetoothA2dp.STATE_NOT_PLAYING
                     )
                     val airPodsMac = this@AirPodsService.device?.address ?: macAddress
-                    if (
-                        state == BluetoothA2dp.STATE_PLAYING &&
-                        airPodsMac.isNotEmpty() &&
+                    val isCurrentAirPods = airPodsMac.isNotEmpty() &&
                         bluetoothDevice.address.equals(airPodsMac, ignoreCase = true)
-                    ) {
+                    if (isCurrentAirPods && state == BluetoothA2dp.STATE_PLAYING) {
+                        isAirPodsA2dpPlaying = true
                         Log.d(TAG, "Local AirPods A2DP started playing; reclaiming AACP control")
                         otherDeviceTookOver = false
                         aacpManager.sendControlCommand(
@@ -2477,6 +2533,26 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             aacpManager.sendMediaInformataion(localMac)
                         }
                         refreshAacpControlSession("local AirPods A2DP playback started")
+                        // Smart routing can emit a transient PLAYING state before
+                        // the AirPods have accepted this phone's AVRCP ownership.
+                        // Give the AACP ownership/source response the first chance
+                        // to trigger a direct resend, then use this as a fallback.
+                        scheduleAirPodsAbsoluteVolumeResync(
+                            "A2DP playback started",
+                            A2DP_DIRECT_VOLUME_RESYNC_DELAY_MS
+                        )
+                        if (SpatialAudioMode.fromPreferences(sharedPreferences) ==
+                            SpatialAudioMode.HEAD_TRACKED
+                        ) {
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                updateSpatialAudioTracking("A2DP playback started")
+                            }, 300)
+                        }
+                    } else if (isCurrentAirPods && state == BluetoothA2dp.STATE_NOT_PLAYING) {
+                        isAirPodsA2dpPlaying = false
+                        prewarmAirPodsAbsoluteVolumeResync("AirPods A2DP stopped")
+                        cancelPendingAirPodsAbsoluteVolumeResync("AirPods A2DP stopped")
+                        updateSpatialAudioTracking("A2DP playback stopped")
                     }
                 }
             }
@@ -2870,7 +2946,19 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     aacpManager.sendSomePacketIDontKnowWhatItIs()
                     delay(200)
                     aacpManager.sendRequestProximityKeys((AACPManager.Companion.ProximityKeyType.IRK.value + AACPManager.Companion.ProximityKeyType.ENC_KEY.value).toByte())
-                    if (!handleIncomingCallOnceConnected) startHeadTracking() else handleIncomingCall()
+                    if (!handleIncomingCallOnceConnected) {
+                        if (SpatialAudioMode.fromPreferences(sharedPreferences) ==
+                            SpatialAudioMode.HEAD_TRACKED
+                        ) {
+                            // The PLAYING broadcast may have happened while the
+                            // service was stopped, so query again once AACP is usable.
+                            refreshCurrentA2dpPlaybackState("AACP connected")
+                        } else {
+                            startHeadTracking()
+                        }
+                    } else {
+                        handleIncomingCall()
+                    }
                     Handler(Looper.getMainLooper()).postDelayed({
                         aacpManager.sendPacket(aacpManager.createHandshakePacket())
                         aacpManager.sendSetFeatureFlagsPacket()
@@ -3255,12 +3343,443 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         if (checkSelfPermission("android.permission.READ_PHONE_STATE") == PackageManager.PERMISSION_GRANTED) {
             telephonyManager.unregisterTelephonyCallback(phoneStateListener)
         }
+        audioFeatureScope.cancel()
+        spatialHeadTrackerBridge.stop()
+        rootAvrcpVolumeController.cancel()
 //        isConnectedLocally = false
 //        CrossDevice.isAvailable = true
         super.onDestroy()
     }
 
     var isHeadTrackingActive = false
+
+    @SuppressLint("MissingPermission")
+    private fun refreshCurrentA2dpPlaybackState(reason: String) {
+        Log.d(TAG, "Querying current AirPods A2DP playback state: $reason")
+        val savedMac = macAddress.takeIf { it.isNotBlank() }
+            ?: sharedPreferences.getString("mac_address", null)
+        if (savedMac.isNullOrBlank()) {
+            isAirPodsA2dpPlaying = false
+            updateSpatialAudioTracking("$reason; no saved AirPods")
+            return
+        }
+
+        val bluetoothAdapter = getSystemService(BluetoothManager::class.java).adapter
+        val target = try {
+            bluetoothAdapter.getRemoteDevice(savedMac)
+        } catch (error: IllegalArgumentException) {
+            Log.w(TAG, "Cannot query A2DP playback for invalid address $savedMac", error)
+            isAirPodsA2dpPlaying = false
+            updateSpatialAudioTracking("$reason; invalid AirPods address")
+            return
+        }
+        val listener = object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                if (profile != BluetoothProfile.A2DP) return
+                val a2dp = proxy as BluetoothA2dp
+                val reflectedPlaying = try {
+                    val method = BluetoothA2dp::class.java.getDeclaredMethod(
+                        "isA2dpPlaying",
+                        BluetoothDevice::class.java
+                    )
+                    method.isAccessible = true
+                    method.invoke(a2dp, target) as? Boolean
+                } catch (error: Exception) {
+                    Log.w(TAG, "BluetoothA2dp.isA2dpPlaying unavailable", error)
+                    null
+                }
+                val targetConnected = a2dp.getConnectionState(target) ==
+                    BluetoothProfile.STATE_CONNECTED
+                val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+                val playing = reflectedPlaying
+                    ?: (targetConnected && audioManager.isMusicActive)
+                bluetoothAdapter.closeProfileProxy(profile, proxy)
+
+                Handler(Looper.getMainLooper()).post {
+                    isAirPodsA2dpPlaying = playing
+                    Log.i(
+                        TAG,
+                        "Current AirPods A2DP playing=$playing " +
+                            "(connected=$targetConnected): $reason"
+                    )
+                    updateSpatialAudioTracking(reason)
+                }
+            }
+
+            override fun onServiceDisconnected(profile: Int) = Unit
+        }
+
+        if (!bluetoothAdapter.getProfileProxy(this, listener, BluetoothProfile.A2DP)) {
+            Log.w(TAG, "Could not obtain A2DP profile proxy: $reason")
+            isAirPodsA2dpPlaying = false
+            updateSpatialAudioTracking("$reason; A2DP proxy unavailable")
+        }
+    }
+
+    private fun shouldRunSpatialAudio(): Boolean {
+        return SpatialAudioMode.fromPreferences(sharedPreferences) ==
+            SpatialAudioMode.HEAD_TRACKED &&
+            isAirPodsA2dpPlaying &&
+            BluetoothConnectionManager.aacpSocket?.isConnected == true
+    }
+
+    private fun scheduleAirPodsAbsoluteVolumeResync(reason: String, delayMs: Long) {
+        if (earlyA2dpVolumeResyncInFlight) {
+            Log.d(TAG, "Early A2DP volume resync already active: $reason")
+            return
+        }
+        if (SystemClock.elapsedRealtime() - lastA2dpVolumeResyncAt <
+            A2DP_VOLUME_RESYNC_DEBOUNCE_MS
+        ) {
+            Log.d(TAG, "Skipping recently completed A2DP volume resync: $reason")
+            return
+        }
+        val generation = ++a2dpVolumeResyncGeneration
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (generation != a2dpVolumeResyncGeneration) {
+                Log.d(TAG, "Skipping superseded A2DP volume resync: $reason")
+                return@postDelayed
+            }
+            resendAirPodsAbsoluteVolume(reason, generation)
+        }, delayMs)
+    }
+
+    private fun cancelPendingAirPodsAbsoluteVolumeResync(reason: String) {
+        a2dpVolumeResyncGeneration++
+        Log.d(TAG, "Cancelled pending A2DP volume resync: $reason")
+    }
+
+    @SuppressLint("MissingPermission", "SoonBlockedPrivateApi")
+    private fun resendAirPodsAbsoluteVolume(reason: String, generation: Int) {
+        if (!isAirPodsA2dpPlaying) {
+            Log.d(TAG, "Skipping A2DP volume resync while not playing: $reason")
+            return
+        }
+
+        val target = device
+        if (target == null) {
+            Log.w(TAG, "Cannot resend A2DP volume without an AirPods device: $reason")
+            return
+        }
+        if (checkSelfPermission("android.permission.BLUETOOTH_PRIVILEGED") !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.d(TAG, "Using root for AirPods volume resync; app is not privileged: $reason")
+            resendAirPodsAbsoluteVolumeAsRoot(target, reason, generation)
+            return
+        }
+        val bluetoothAdapter = getSystemService(BluetoothManager::class.java).adapter
+        val listener = object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                if (profile != BluetoothProfile.A2DP) return
+                val a2dp = proxy as BluetoothA2dp
+                try {
+                    if (generation != a2dpVolumeResyncGeneration ||
+                        !isAirPodsA2dpPlaying ||
+                        a2dp.getConnectionState(target) != BluetoothProfile.STATE_CONNECTED
+                    ) {
+                        Log.d(TAG, "Skipping stale A2DP volume resend: $reason")
+                        return
+                    }
+
+                    val (pulseVolume, volume) = currentA2dpVolumePulse(direct = true)
+                    val method = BluetoothA2dp::class.java.getDeclaredMethod(
+                        "setAvrcpAbsoluteVolume",
+                        Int::class.javaPrimitiveType
+                    )
+                    method.isAccessible = true
+                    // Despite the public method name/docs, Android's audio
+                    // service supplies the active device-volume index here.
+                    // HyperOS then maps its 0..150 index to AVRCP's 0..127.
+                    method.invoke(a2dp, pulseVolume)
+                    method.invoke(a2dp, volume)
+                    lastA2dpVolumeResyncAt = SystemClock.elapsedRealtime()
+                    Log.i(
+                        TAG,
+                        "Directly pulsed AirPods device volume=$pulseVolume->$volume: $reason"
+                    )
+                } catch (error: Exception) {
+                    val cause = error.cause ?: error
+                    Log.w(
+                        TAG,
+                        "Direct AirPods AVRCP volume resend failed; trying root: $reason",
+                        cause
+                    )
+                    resendAirPodsAbsoluteVolumeAsRoot(target, reason, generation)
+                } finally {
+                    bluetoothAdapter.closeProfileProxy(profile, proxy)
+                }
+            }
+
+            override fun onServiceDisconnected(profile: Int) = Unit
+        }
+
+        if (!bluetoothAdapter.getProfileProxy(this, listener, BluetoothProfile.A2DP)) {
+            Log.w(TAG, "Could not obtain A2DP proxy for volume resend: $reason")
+            resendAirPodsAbsoluteVolumeAsRoot(target, reason, generation)
+        }
+    }
+
+    private fun resendAirPodsAbsoluteVolumeAsRoot(
+        target: BluetoothDevice,
+        reason: String,
+        generation: Int
+    ) {
+        if (generation != a2dpVolumeResyncGeneration || !isAirPodsA2dpPlaying) return
+        val (pulseVolume, volume) = currentA2dpVolumePulse(direct = true)
+        audioFeatureScope.launch(Dispatchers.IO) {
+            val result = rootAvrcpVolumeController.resend(
+                target.address,
+                pulseVolume,
+                volume
+            )
+            withContext(Dispatchers.Main) {
+                if (result.success) {
+                    Log.i(
+                        TAG,
+                        "Root pulsed AirPods device volume=$pulseVolume->$volume: $reason"
+                    )
+                    lastA2dpVolumeResyncAt = SystemClock.elapsedRealtime()
+                    prewarmAirPodsAbsoluteVolumeResync("root volume resync complete")
+                } else {
+                    Log.w(TAG, "Root AirPods AVRCP resend failed: ${result.output}")
+                    if (generation == a2dpVolumeResyncGeneration) {
+                        pulseAirPodsAbsoluteVolume(reason)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun prewarmAirPodsAbsoluteVolumeResync(reason: String) {
+        if (checkSelfPermission("android.permission.BLUETOOTH_PRIVILEGED") ==
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        val target = device ?: return
+        audioFeatureScope.launch(Dispatchers.IO) {
+            val result = rootAvrcpVolumeController.prewarm(target.address)
+            if (result.success) {
+                Log.i(TAG, "Prewarmed root AirPods volume bridge: $reason")
+            } else {
+                Log.w(TAG, "Could not prewarm root AirPods volume bridge: ${result.output}")
+            }
+        }
+    }
+
+    fun onLocalMediaPlaybackStarting() {
+        if (isAirPodsA2dpPlaying || earlyA2dpVolumeResyncInFlight) return
+        if (checkSelfPermission("android.permission.BLUETOOTH_PRIVILEGED") ==
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        val target = device ?: return
+        val (pulseVolume, volume) = currentA2dpVolumePulse(direct = true)
+        earlyA2dpVolumeResyncInFlight = true
+        Log.i(TAG, "Triggering prewarmed AirPods volume bridge from local media start")
+        audioFeatureScope.launch(Dispatchers.IO) {
+            val result = rootAvrcpVolumeController.resend(
+                target.address,
+                pulseVolume,
+                volume,
+                awaitPlayback = true
+            )
+            withContext(Dispatchers.Main) {
+                earlyA2dpVolumeResyncInFlight = false
+                if (result.success) {
+                    Log.i(
+                        TAG,
+                        "Early root pulse restored AirPods device volume=" +
+                            "$pulseVolume->$volume"
+                    )
+                    lastA2dpVolumeResyncAt = SystemClock.elapsedRealtime()
+                    prewarmAirPodsAbsoluteVolumeResync("early volume resync complete")
+                } else {
+                    Log.w(TAG, "Early root AirPods AVRCP resend failed: ${result.output}")
+                    if (isAirPodsA2dpPlaying) {
+                        pulseAirPodsAbsoluteVolume("early root AVRCP fallback")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun pulseAirPodsAbsoluteVolume(reason: String) {
+        if (!isAirPodsA2dpPlaying) {
+            Log.d(TAG, "Skipping A2DP volume pulse while not playing: $reason")
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastA2dpVolumeResyncAt < A2DP_VOLUME_RESYNC_DEBOUNCE_MS) {
+            Log.d(TAG, "Skipping duplicate A2DP volume pulse: $reason")
+            return
+        }
+
+        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        // AirPods/HyperOS quantizes AVRCP volume to roughly 15 steps. A same-
+        // index write, or a one-unit change on fine-volume devices, is filtered
+        // before it reaches the earbuds. Pulse exactly one effective step and
+        // restore the cached phone value after the first command is delivered.
+        val (pulseVolume, volume) = currentA2dpVolumePulse(direct = false)
+        lastA2dpVolumeResyncAt = now
+        if (pulseVolume == volume) {
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, volume, 0)
+            Log.i(TAG, "Resent AirPods A2DP volume=$volume: $reason")
+            return
+        }
+
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, pulseVolume, 0)
+        Handler(Looper.getMainLooper()).postDelayed({
+            // Do not overwrite a real user adjustment made during the pulse.
+            if (audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) == pulseVolume) {
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, volume, 0)
+                Log.i(
+                    TAG,
+                    "Restored AirPods A2DP volume=$volume after pulse=$pulseVolume: $reason"
+                )
+            } else {
+                Log.i(TAG, "User changed volume during A2DP resync; not restoring $volume")
+            }
+        }, A2DP_VOLUME_PULSE_MS)
+        Log.i(TAG, "Pulsed AirPods A2DP volume=$pulseVolume from $volume: $reason")
+    }
+
+    private fun calculateA2dpVolumePulse(
+        volume: Int,
+        minimum: Int,
+        maximum: Int
+    ): Int {
+        // AirPods/HyperOS quantizes absolute volume to roughly 15 steps.
+        // Move one effective step so the Bluetooth cache cannot discard the
+        // following restore as a same-value write.
+        val step = ((maximum - minimum) / 15).coerceAtLeast(1)
+        return if (volume + step <= maximum) {
+            volume + step
+        } else {
+            (volume - step).coerceAtLeast(minimum)
+        }
+    }
+
+    private fun currentA2dpVolumePulse(direct: Boolean): Pair<Int, Int> {
+        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        val volume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val minimum = audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC)
+        val maximum = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val pulse = if (direct) {
+            calculateDirectA2dpVolumePulse(volume, minimum, maximum)
+        } else {
+            calculateA2dpVolumePulse(volume, minimum, maximum)
+        }
+        return pulse to volume
+    }
+
+    private fun calculateDirectA2dpVolumePulse(
+        volume: Int,
+        minimum: Int,
+        maximum: Int
+    ): Int {
+        val range = maximum - minimum
+        if (range <= 0) return volume
+        fun toAvrcp(deviceVolume: Int): Int {
+            val normalized = (deviceVolume - minimum).coerceIn(0, range)
+            return ((normalized.toLong() * 127L + range / 2L) / range).toInt()
+        }
+
+        val currentAvrcp = toAvrcp(volume)
+        for (candidate in (volume + 1)..maximum) {
+            if (toAvrcp(candidate) != currentAvrcp) return candidate
+        }
+        for (candidate in (volume - 1) downTo minimum) {
+            if (toAvrcp(candidate) != currentAvrcp) return candidate
+        }
+        return volume
+    }
+
+    private fun updateSpatialAudioTracking(reason: String) {
+        val shouldRun = shouldRunSpatialAudio()
+        val transitionId = ++spatialAudioTransitionId
+        if (shouldRun) {
+            Log.i(TAG, "Starting spatial tracking: $reason")
+            // Android can select a head-tracking mode only after the matching
+            // dynamic sensor exists, so create UHID before changing the mode.
+            startHeadTracking()
+            audioFeatureScope.launch(Dispatchers.IO) {
+                spatialAudioTransitionMutex.withLock {
+                    if (transitionId != spatialAudioTransitionId) return@withLock
+                    var state = spatialAudioController.setMode(SpatialAudioMode.HEAD_TRACKED)
+                    if (state.error == null && state.actualMode != 1 &&
+                        transitionId == spatialAudioTransitionId && shouldRunSpatialAudio()
+                    ) {
+                        // HyperOS can keep a previously registered dynamic
+                        // head tracker stuck in DISABLED even though it reports
+                        // available. Recreating the UHID device makes the native
+                        // Spatializer bind the new sensor handle and apply the
+                        // already-requested RELATIVE_WORLD mode.
+                        Log.w(
+                            TAG,
+                            "Spatializer actual mode stayed ${state.actualMode}; " +
+                                "recreating the head tracker"
+                        )
+                        withContext(Dispatchers.Main) {
+                            spatialHeadTrackerBridge.stop()
+                            HeadTracking.reset()
+                        }
+                        // DynamicSensorManager removes UHID sensors
+                        // asynchronously. Starting the replacement too soon
+                        // can make it overlap the old device with the same UUID.
+                        delay(1500)
+                        if (transitionId != spatialAudioTransitionId ||
+                            !shouldRunSpatialAudio()
+                        ) {
+                            return@withLock
+                        }
+                        withContext(Dispatchers.Main) {
+                            startHeadTracking()
+                        }
+                        // Give the HID raw sensor service time to publish the
+                        // replacement handle before asking AudioService again.
+                        delay(2500)
+                        if (transitionId != spatialAudioTransitionId ||
+                            !shouldRunSpatialAudio()
+                        ) {
+                            return@withLock
+                        }
+                        state = spatialAudioController.setMode(SpatialAudioMode.HEAD_TRACKED)
+                    }
+                    Log.i(
+                        TAG,
+                        "Spatializer mode for '$reason': desired=${state.desiredMode}, " +
+                            "actual=${state.actualMode}, error=${state.error}"
+                    )
+                }
+            }
+        } else {
+            Log.i(TAG, "Stopping spatial tracking: $reason")
+            // Keep UHID alive until AudioService confirms the disabled mode;
+            // otherwise some vendor implementations retain a stale actual=1.
+            audioFeatureScope.launch(Dispatchers.IO) {
+                spatialAudioTransitionMutex.withLock {
+                    if (transitionId != spatialAudioTransitionId) return@withLock
+                    val selectedMode = SpatialAudioMode.fromPreferences(sharedPreferences)
+                    val inactiveMode = if (selectedMode == SpatialAudioMode.OFF) {
+                        SpatialAudioMode.OFF
+                    } else {
+                        SpatialAudioMode.FIXED
+                    }
+                    val state = spatialAudioController.setMode(inactiveMode)
+                    Log.i(
+                        TAG,
+                        "Spatializer mode=$inactiveMode for '$reason': " +
+                            "enabled=${state.spatializerEnabled}, desired=${state.desiredMode}, " +
+                            "actual=${state.actualMode}, error=${state.error}"
+                    )
+                    withContext(Dispatchers.Main) {
+                        if (transitionId == spatialAudioTransitionId && !shouldRunSpatialAudio()) {
+                            stopHeadTracking(force = true)
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fun startHeadTracking() {
         isHeadTrackingActive = true
@@ -3280,9 +3799,24 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             aacpManager.sendStartHeadTracking()
         }
         HeadTracking.reset()
+        if (shouldRunSpatialAudio()) {
+            val trackerMac = device?.address
+                ?: macAddress.takeIf { it.isNotBlank() }
+                ?: sharedPreferences.getString("mac_address", null)
+            if (trackerMac == null) {
+                Log.e(TAG, "Cannot start spatial head tracker: no AirPods Bluetooth address")
+            } else {
+                Log.d(TAG, "Starting spatial head tracker for $trackerMac")
+                spatialHeadTrackerBridge.start(trackerMac)
+            }
+        }
     }
 
-    fun stopHeadTracking() {
+    fun stopHeadTracking(force: Boolean = false) {
+        if (!force && shouldRunSpatialAudio()) {
+            Log.d(TAG, "Keeping head tracking active for spatial audio")
+            return
+        }
         val useAlternatePackets =
             sharedPreferences.getBoolean("use_alternate_head_tracking_packets", true)
         if (useAlternatePackets) {
@@ -3291,7 +3825,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             aacpManager.sendStopHeadTracking()
         }
         isHeadTrackingActive = false
-        gestureDetector?.stopDetection()
+        spatialHeadTrackerBridge.stop()
+        gestureDetector?.stopDetection(doNotStop = true)
     }
 
     @SuppressLint("MissingPermission")
