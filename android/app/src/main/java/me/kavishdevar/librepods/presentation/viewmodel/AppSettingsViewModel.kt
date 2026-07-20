@@ -13,6 +13,11 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.billing.BillingManager
+import me.kavishdevar.librepods.data.PhoneSoundRoutingPolicy
+import me.kavishdevar.librepods.data.PhoneSoundRoutingPreferences
+import me.kavishdevar.librepods.data.SmartRoutingAudioCategory
+import me.kavishdevar.librepods.data.SmartRoutingAudioPolicy
+import me.kavishdevar.librepods.data.SmartRoutingAudioPolicyPreferences
 import me.kavishdevar.librepods.data.XposedRemotePrefProvider
 import me.kavishdevar.librepods.utils.RootSpatialAudioController
 import me.kavishdevar.librepods.utils.SpatialAudioMode
@@ -28,7 +33,6 @@ data class AppSettingsUiState(
     val takeoverWhenMusic: Boolean = false,
     val takeoverWhenCall: Boolean = false,
     val takeoverWhenRingingCall: Boolean = false,
-    val takeoverWhenMediaStart: Boolean = false,
     val useAlternateHeadTrackingPackets: Boolean = true,
     val spatialAudioMode: SpatialAudioMode = SpatialAudioMode.OFF,
     val spatialAudioCapabilityChecked: Boolean = false,
@@ -43,6 +47,9 @@ data class AppSettingsUiState(
     val vendorIdHook: Boolean = false,
     val vendorAttSocket: Boolean = false,
     val smartRoutingAutoTakeover: Boolean = false,
+    val smartRoutingAudioPolicy: SmartRoutingAudioPolicy = SmartRoutingAudioPolicy.DEFAULT,
+    val phoneSoundRoutingEnabled: Boolean = true,
+    val phoneSoundRoutingPolicy: PhoneSoundRoutingPolicy = PhoneSoundRoutingPolicy.DEFAULT,
     val isPremium: Boolean = false,
     val connectionSuccessful: Boolean = false,
     val showBottomSheetPopup: Boolean = true,
@@ -61,8 +68,37 @@ class AppSettingsViewModel(application: Application) : AndroidViewModel(applicat
     private val spatialAudioController = RootSpatialAudioController(application)
 
     val sharedPrefListener = SharedPreferences.OnSharedPreferenceChangeListener { sharedPref, key ->
-        if (key == "connection_successful") {
-            _uiState.update { it.copy(connectionSuccessful = sharedPref.getBoolean(key, false)) }
+        when (key) {
+            "connection_successful" -> {
+                _uiState.update {
+                    it.copy(connectionSuccessful = sharedPref.getBoolean(key, false))
+                }
+            }
+            SmartRoutingAudioPolicyPreferences.MASTER_ENABLED_KEY -> {
+                _uiState.update {
+                    it.copy(smartRoutingAutoTakeover = sharedPref.getBoolean(key, false))
+                }
+            }
+            SmartRoutingAudioPolicyPreferences.ENABLED_CATEGORIES_KEY -> {
+                _uiState.update {
+                    it.copy(
+                        smartRoutingAudioPolicy = SmartRoutingAudioPolicyPreferences.read(sharedPref)
+                    )
+                }
+            }
+            PhoneSoundRoutingPreferences.MASTER_ENABLED_KEY -> {
+                _uiState.update {
+                    it.copy(phoneSoundRoutingEnabled =
+                        PhoneSoundRoutingPreferences.isEnabled(sharedPref))
+                }
+            }
+            PhoneSoundRoutingPreferences.ROUTED_CATEGORIES_KEY -> {
+                _uiState.update {
+                    it.copy(
+                        phoneSoundRoutingPolicy = PhoneSoundRoutingPreferences.read(sharedPref)
+                    )
+                }
+            }
         }
     }
 
@@ -146,6 +182,9 @@ class AppSettingsViewModel(application: Application) : AndroidViewModel(applicat
             }
         }
 
+        val smartRoutingAudioPolicy = SmartRoutingAudioPolicyPreferences.read(sharedPreferences)
+        val phoneSoundRoutingPolicy = PhoneSoundRoutingPreferences.read(sharedPreferences)
+
         _uiState.update { currentState ->
             currentState.copy(
                 showPhoneBatteryInWidget = sharedPreferences.getBoolean("show_phone_battery_in_widget", false),
@@ -157,7 +196,6 @@ class AppSettingsViewModel(application: Application) : AndroidViewModel(applicat
                 takeoverWhenMusic = sharedPreferences.getBoolean("takeover_when_music", false),
                 takeoverWhenCall = sharedPreferences.getBoolean("takeover_when_call", false),
                 takeoverWhenRingingCall = sharedPreferences.getBoolean("takeover_when_ringing_call", false),
-                takeoverWhenMediaStart = sharedPreferences.getBoolean("takeover_when_media_start", false),
                 useAlternateHeadTrackingPackets = sharedPreferences.getBoolean("use_alternate_head_tracking_packets", true),
                 spatialAudioMode = SpatialAudioMode.fromPreferences(sharedPreferences),
                 conversationalAwarenessVolume = sharedPreferences.getInt("conversational_awareness_volume", 43).toFloat(),
@@ -165,8 +203,13 @@ class AppSettingsViewModel(application: Application) : AndroidViewModel(applicat
                 vendorIdHook = xposedRemotePref.getBoolean("vendor_id_hook", false),
                 vendorAttSocket = sharedPreferences.getBoolean("vendor_att_socket", false),
                 smartRoutingAutoTakeover = sharedPreferences.getBoolean(
-                    "smart_routing_auto_takeover", false
+                    SmartRoutingAudioPolicyPreferences.MASTER_ENABLED_KEY, false
                 ),
+                smartRoutingAudioPolicy = smartRoutingAudioPolicy,
+                phoneSoundRoutingEnabled = PhoneSoundRoutingPreferences.isEnabled(
+                    sharedPreferences
+                ),
+                phoneSoundRoutingPolicy = phoneSoundRoutingPolicy,
                 connectionSuccessful = sharedPreferences.getBoolean("connection_successful", false),
                 showBottomSheetPopup = sharedPreferences.getBoolean("show_bottom_sheet_popup", true),
                 showIslandPopup = sharedPreferences.getBoolean("show_island_popup", true),
@@ -218,11 +261,6 @@ class AppSettingsViewModel(application: Application) : AndroidViewModel(applicat
     fun setTakeoverWhenRingingCall(enabled: Boolean) {
         sharedPreferences.edit { putBoolean("takeover_when_ringing_call", enabled) }
         _uiState.update { it.copy(takeoverWhenRingingCall = enabled) }
-    }
-
-    fun setTakeoverWhenMediaStart(enabled: Boolean) {
-        sharedPreferences.edit { putBoolean("takeover_when_media_start", enabled) }
-        _uiState.update { it.copy(takeoverWhenMediaStart = enabled) }
     }
 
     fun setUseAlternateHeadTrackingPackets(enabled: Boolean) {
@@ -318,8 +356,41 @@ class AppSettingsViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun setSmartRoutingAutoTakeover(enabled: Boolean) {
-        sharedPreferences.edit { putBoolean("smart_routing_auto_takeover", enabled) }
+        sharedPreferences.edit {
+            putBoolean(SmartRoutingAudioPolicyPreferences.MASTER_ENABLED_KEY, enabled)
+        }
         _uiState.update { it.copy(smartRoutingAutoTakeover = enabled) }
+    }
+
+    fun setSmartRoutingAudioCategoryEnabled(
+        category: SmartRoutingAudioCategory,
+        enabled: Boolean
+    ) {
+        val policy = SmartRoutingAudioPolicyPreferences.setCategoryEnabled(
+            sharedPreferences,
+            category,
+            enabled
+        )
+        _uiState.update { it.copy(smartRoutingAudioPolicy = policy) }
+    }
+
+    fun setPhoneSoundRoutingEnabled(enabled: Boolean) {
+        sharedPreferences.edit {
+            putBoolean(PhoneSoundRoutingPreferences.MASTER_ENABLED_KEY, enabled)
+        }
+        _uiState.update { it.copy(phoneSoundRoutingEnabled = enabled) }
+    }
+
+    fun setPhoneSoundRoutingCategoryEnabled(
+        category: SmartRoutingAudioCategory,
+        enabled: Boolean
+    ) {
+        val policy = PhoneSoundRoutingPreferences.setCategoryEnabled(
+            sharedPreferences,
+            category,
+            enabled
+        )
+        _uiState.update { it.copy(phoneSoundRoutingPolicy = policy) }
     }
 
     fun setShowBottomSheetPopup(enabled: Boolean) {

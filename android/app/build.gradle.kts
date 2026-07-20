@@ -1,6 +1,7 @@
 import java.util.Properties
+import java.util.zip.ZipFile
 
-val appVersionName = "1.0.2"
+val appVersionName = "1.0.2-sr1"
 
 plugins {
     alias(libs.plugins.android.application)
@@ -49,7 +50,7 @@ android {
     defaultConfig {
         applicationId = "me.kavishdevar.librepods"
         targetSdk = 37
-        versionCode = 68
+        versionCode = 69
         versionName = appVersionName
     }
     buildTypes {
@@ -159,6 +160,7 @@ dependencies {
     implementation(libs.androidx.navigation3.runtime)
     implementation(libs.androidx.lifecycle.viewmodel.navigation3)
     implementation(libs.androidx.navigationevent)
+    testImplementation(kotlin("test-junit"))
 }
 
 aboutLibraries {
@@ -221,12 +223,13 @@ fun registerRootModuleZipTask(
     dependsOn(variantTask, buildHeadTrackerHelper)
 
     val apkPath = "outputs/apk/$flavor/$buildType/app-$flavor-$buildType.apk"
+    val apkFile = layout.buildDirectory.file(apkPath)
 
     from(rootModuleDir)
 
     duplicatesStrategy = DuplicatesStrategy.WARN
 
-    from(layout.buildDirectory.file(apkPath)) {
+    from(apkFile) {
         into("system/priv-app/LibrePods")
         rename { "LibrePods.apk" }
     }
@@ -238,10 +241,21 @@ fun registerRootModuleZipTask(
         }
     }
 
-    delete(layout.buildDirectory.dir("outputs/rootModuleZips"))
-
     archiveFileName.set("LibrePods-FOSS-v$appVersionName-$buildType.zip")
     destinationDirectory.set(layout.buildDirectory.dir("outputs/rootModuleZips"))
+
+    doFirst {
+        check(apkFile.get().asFile.isFile) {
+            "Missing signed APK for root module: ${apkFile.get().asFile}"
+        }
+    }
+    doLast {
+        ZipFile(archiveFile.get().asFile).use { archive ->
+            check(archive.getEntry("system/priv-app/LibrePods/LibrePods.apk") != null) {
+                "Root module was built without system/priv-app/LibrePods/LibrePods.apk"
+            }
+        }
+    }
 }
 
 val zipRelease = registerRootModuleZipTask(

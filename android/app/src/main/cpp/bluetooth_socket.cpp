@@ -42,6 +42,9 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
         constexpr auto c6 = ENC("java/lang/String");
         constexpr auto c7 = ENC("Landroid/bluetooth/BluetoothSocket;");
         constexpr auto c8 = ENC("Landroid/bluetooth/BluetoothDevice;");
+        constexpr auto c9 = ENC("Landroid/media/audiopolicy/");
+        constexpr auto c10 = ENC("Landroid/media/AudioPlaybackConfiguration;");
+        constexpr auto c11 = ENC("Landroid/media/AudioManager;");
 
         JNIEnv* env;
         getVm()->AttachCurrentThread(&env, nullptr);
@@ -52,9 +55,12 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
 
         jobject runtime = env->CallStaticObjectMethod(vmRuntime, getRuntime);
         jobjectArray prefixes = env->NewObjectArray(
-                2, env->FindClass(DEC(c6)), nullptr);
+                5, env->FindClass(DEC(c6)), nullptr);
         env->SetObjectArrayElement(prefixes, 0, env->NewStringUTF(DEC(c7)));
         env->SetObjectArrayElement(prefixes, 1, env->NewStringUTF(DEC(c8)));
+        env->SetObjectArrayElement(prefixes, 2, env->NewStringUTF(DEC(c9)));
+        env->SetObjectArrayElement(prefixes, 3, env->NewStringUTF(DEC(c10)));
+        env->SetObjectArrayElement(prefixes, 4, env->NewStringUTF(DEC(c11)));
 
         env->CallVoidMethod(runtime, setExemptions, prefixes);
         getVm()->DetachCurrentThread();

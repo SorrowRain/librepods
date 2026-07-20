@@ -31,6 +31,43 @@
 
 LibrePods allows you to use AirPods features that are exclusive to Apple devices. It implements the proprietary protocol used to exchange data between AirPods and Apple devices, enabling features like changing noise control modes, fast ear detection, accurate battery status, head gestures, conversational awareness, and more on non-Apple platforms.
 
+<h1 align="center">HyperOS Smart Routing Enhanced</h1>
+
+This fork includes a HyperOS-focused Android build (`v1.0.2-sr1`) that keeps short
+phone sounds from interrupting AirPods audio on another device while preserving
+intentional handoff for music and video.
+
+## HyperOS changes
+
+- **Automatic takeover allowlist:** choose which Android audio categories may move
+  AirPods to the phone. Media is the only category enabled by default.
+- **Keep on phone:** independently choose short-sound categories that must render
+  through the built-in phone speaker. Notifications and system/charging sounds are
+  protected by default.
+- **Confirmed handoff:** local media is paused during takeover and resumed only after
+  ownership, the AACP source, and the target A2DP connection are confirmed.
+- **Routing diagnostics:** an optional structured debug log records decisions and can
+  be marked, exported, or cleared without collecting raw Bluetooth packets or logcat.
+- **HyperOS UI integration:** the foreground notification folds automatically and the
+  app is hidden from the recent-apps screen.
+- **Safer local identity handling:** invalid or unavailable local Bluetooth addresses
+  fail closed instead of being mistaken for a remote host.
+
+The two audio policies are intentionally independent. Disabling automatic takeover
+does not by itself force a sound to the phone speaker; select that category under
+**Keep on phone** when speaker-only routing is required.
+
+The speaker-routing policy requires the matching LibrePods Root module because it
+uses the privileged Android `AudioPolicy` API. Smart Routing takeover also requires
+the existing Xposed VendorID spoofing option. See the
+[routing design and verification notes](docs/android-audio-routing-plan.md) for the
+implementation details and test matrix.
+
+> [!NOTE]
+> When AirPods currently belong to another host, the first local media attempt can
+> still be audible briefly through the phone speaker before Android reports playback
+> and the takeover pause takes effect.
+
 # Feature availability
 
 | Feature                                                     | Linux | Android |

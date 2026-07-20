@@ -34,6 +34,7 @@ import me.kavishdevar.librepods.presentation.screens.OpenSourceLicensesScreen
 import me.kavishdevar.librepods.presentation.screens.PurchaseScreen
 import me.kavishdevar.librepods.presentation.screens.ReleaseNotesScreen
 import me.kavishdevar.librepods.presentation.screens.RenameScreen
+import me.kavishdevar.librepods.presentation.screens.SmartRoutingAudioSourcesScreen
 import me.kavishdevar.librepods.presentation.screens.TransparencySettingsScreen
 import me.kavishdevar.librepods.presentation.screens.TroubleshootingScreen
 import me.kavishdevar.librepods.presentation.screens.UpdateHearingTestRoute
@@ -64,6 +65,7 @@ fun AppNavGraph(
     }
 
     val m3eEnabled = LocalDesignSystem.current == DesignSystem.Material
+    val appSettingsViewModel: AppSettingsViewModel = viewModel()
 
     SharedTransitionLayout {
         NavDisplay(
@@ -122,14 +124,21 @@ fun AppNavGraph(
 
                     Screen.AppSettings ->
                         NavEntry(screen) {
-                            val vm: AppSettingsViewModel = viewModel()
                             AppSettingsScreen(
-                                viewModel = vm,
+                                viewModel = appSettingsViewModel,
                                 navigateToPurchase = ::navigateToPurchase,
                                 navigateToTroubleshooting = { navigate(Screen.Troubleshooting) },
                                 navigateToOpenSourceLicenses = { navigate(Screen.OpenSourceLicenses) },
-                                navigateToReleaseNotesScreen = { navigate(Screen.ReleaseNotes) }
+                                navigateToReleaseNotesScreen = { navigate(Screen.ReleaseNotes) },
+                                navigateToSmartRoutingAudioSources = {
+                                    navigate(Screen.SmartRoutingAudioSources)
+                                }
                             )
+                        }
+
+                    Screen.SmartRoutingAudioSources ->
+                        NavEntry(screen) {
+                            SmartRoutingAudioSourcesScreen(appSettingsViewModel)
                         }
 
                     Screen.Troubleshooting ->

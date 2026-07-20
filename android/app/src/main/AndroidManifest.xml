@@ -35,6 +35,9 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission
+        android:name="android.permission.MODIFY_AUDIO_ROUTING"
+        tools:ignore="ProtectedPermissions" />
 <!--    <uses-permission android:name="android.permission.INTERNET" />-->
 <!--    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"-->
 <!--        android:maxSdkVersion="30" />-->
@@ -81,6 +84,7 @@
 
         <activity
             android:name=".MainActivity"
+            android:excludeFromRecents="true"
             android:exported="true"
             android:theme="@style/Theme.LibrePods">
             <intent-filter>

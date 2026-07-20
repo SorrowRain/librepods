@@ -81,6 +81,7 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.data.SmartRoutingAudioCategory
 import me.kavishdevar.librepods.presentation.components.AppInfoCard
 import me.kavishdevar.librepods.presentation.components.DeviceInfoCard
 import me.kavishdevar.librepods.presentation.components.StyledBottomSheet
@@ -106,7 +107,8 @@ fun AppSettingsScreen(
     navigateToPurchase: () -> Unit,
     navigateToTroubleshooting: () -> Unit,
     navigateToOpenSourceLicenses: () -> Unit,
-    navigateToReleaseNotesScreen: () -> Unit
+    navigateToReleaseNotesScreen: () -> Unit,
+    navigateToSmartRoutingAudioSources: () -> Unit
 ) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
@@ -333,13 +335,6 @@ fun AppSettingsScreen(
                     onCheckedChange = viewModel::setTakeoverWhenRingingCall,
                     enabled = state.isPremium
                 )
-                StyledToggle(
-                    label = stringResource(R.string.takeover_media_start),
-                    description = stringResource(R.string.takeover_media_start_desc),
-                    checked = state.takeoverWhenMediaStart,
-                    onCheckedChange = viewModel::setTakeoverWhenMediaStart,
-                    enabled = state.isPremium
-                )
             }
 
             val spatialAudioControlsEnabled = state.spatialAudioCapabilityChecked &&
@@ -439,6 +434,17 @@ fun AppSettingsScreen(
                     checked = state.smartRoutingAutoTakeover,
                     onCheckedChange = viewModel::setSmartRoutingAutoTakeover
                 )
+                StyledList {
+                    StyledListItem(
+                        name = stringResource(R.string.smart_routing_audio_sources),
+                        description = stringResource(
+                            R.string.smart_routing_audio_sources_summary,
+                            state.smartRoutingAudioPolicy.enabledCategories.size,
+                            SmartRoutingAudioCategory.entries.size
+                        ),
+                        onClick = navigateToSmartRoutingAudioSources
+                    )
+                }
             }
         }
 

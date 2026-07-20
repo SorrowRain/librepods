@@ -18,6 +18,7 @@
 
 package me.kavishdevar.librepods.presentation.screens
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -52,6 +53,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -67,6 +69,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -96,6 +99,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.diagnostics.RoutingTrace
+import me.kavishdevar.librepods.presentation.components.StyledToggle
 import me.kavishdevar.librepods.utils.LogCollector
 import java.io.File
 import java.text.SimpleDateFormat
@@ -118,6 +123,7 @@ fun CustomIconButton(
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalHazeMaterialsApi::class)
+@SuppressLint("LocalContextGetResourceValueCall")
 @Composable
 fun TroubleshootingScreen() {
     val context = LocalContext.current
@@ -126,8 +132,11 @@ fun TroubleshootingScreen() {
 
     val logCollector = remember { LogCollector(context) }
     val savedLogs = remember { mutableStateListOf<File>() }
+    val routingTraceStatus by RoutingTrace.status.collectAsState()
 
     var isCollectingLogs by remember { mutableStateOf(false) }
+    var routingTraceOperationInProgress by remember { mutableStateOf(false) }
+    var showClearRoutingTraceDialog by remember { mutableStateOf(false) }
     var showTroubleshootingSteps by remember { mutableStateOf(false) }
     var currentStep by remember { mutableIntStateOf(0) }
     var logContent by remember { mutableStateOf("") }
@@ -156,6 +165,7 @@ fun TroubleshootingScreen() {
     val isDarkTheme = isSystemInDarkTheme()
 
     LaunchedEffect(Unit) {
+        RoutingTrace.initialize(context)
         withContext(Dispatchers.IO) {
             val logsDir = File(context.filesDir, "logs")
             if (logsDir.exists()) {
@@ -210,6 +220,25 @@ fun TroubleshootingScreen() {
         showBottomSheet = true
     }
 
+    fun shareRoutingArchive(file: File) {
+        val fileUri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.provider",
+            file,
+        )
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/zip"
+            putExtra(Intent.EXTRA_STREAM, fileUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(
+            Intent.createChooser(
+                shareIntent,
+                context.getString(R.string.routing_diagnostics_export),
+            ),
+        )
+    }
+
     val backdrop = rememberLayerBackdrop()
 
     Box(
@@ -227,6 +256,149 @@ fun TroubleshootingScreen() {
                 .padding(horizontal = 16.dp)
         ) {
             Spacer(modifier = Modifier.height(topPadding))
+
+            StyledToggle(
+                title = stringResource(R.string.routing_diagnostics),
+                label = stringResource(R.string.routing_diagnostics_debug_mode),
+                description = stringResource(R.string.routing_diagnostics_debug_mode_description),
+                checked = routingTraceStatus.enabled,
+                enabled = routingTraceStatus.initialized && !routingTraceOperationInProgress,
+                onCheckedChange = RoutingTrace::setEnabled,
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Button(
+                    onClick = {
+                        coroutineScope.launch {
+                            routingTraceOperationInProgress = true
+                            runCatching { RoutingTrace.export() }
+                                .onSuccess(::shareRoutingArchive)
+                                .onFailure { error ->
+                                    Toast.makeText(
+                                        context,
+                                        context.getString(
+                                            R.string.routing_diagnostics_export_failed,
+                                            error.localizedMessage ?: error::class.java.simpleName,
+                                        ),
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                }
+                            routingTraceOperationInProgress = false
+                        }
+                    },
+                    enabled = routingTraceStatus.initialized &&
+                        routingTraceStatus.fileCount > 0 &&
+                        !routingTraceOperationInProgress,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = null,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(stringResource(R.string.routing_diagnostics_export))
+                }
+
+                Button(
+                    onClick = { showClearRoutingTraceDialog = true },
+                    enabled = routingTraceStatus.initialized &&
+                        routingTraceStatus.fileCount > 0 &&
+                        !routingTraceOperationInProgress,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    ),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = null,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(stringResource(R.string.routing_diagnostics_clear))
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Button(
+                onClick = {
+                    RoutingTrace.mark()
+                    Toast.makeText(
+                        context,
+                        R.string.routing_diagnostics_marked,
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                },
+                enabled = routingTraceStatus.enabled && !routingTraceOperationInProgress,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(imageVector = Icons.Default.Check, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(stringResource(R.string.routing_diagnostics_mark))
+            }
+
+            routingTraceStatus.lastError?.let { error ->
+                Text(
+                    text = stringResource(R.string.routing_diagnostics_writer_error, error),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+
+            if (showClearRoutingTraceDialog) {
+                AlertDialog(
+                    onDismissRequest = { showClearRoutingTraceDialog = false },
+                    title = { Text(stringResource(R.string.routing_diagnostics_clear_title)) },
+                    text = { Text(stringResource(R.string.routing_diagnostics_clear_message)) },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                showClearRoutingTraceDialog = false
+                                coroutineScope.launch {
+                                    routingTraceOperationInProgress = true
+                                    runCatching { RoutingTrace.clear() }
+                                        .onSuccess {
+                                            Toast.makeText(
+                                                context,
+                                                R.string.routing_diagnostics_cleared,
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                        }
+                                        .onFailure { error ->
+                                            Toast.makeText(
+                                                context,
+                                                context.getString(
+                                                    R.string.routing_diagnostics_clear_failed,
+                                                    error.localizedMessage
+                                                        ?: error::class.java.simpleName,
+                                                ),
+                                                Toast.LENGTH_LONG,
+                                            ).show()
+                                        }
+                                    routingTraceOperationInProgress = false
+                                }
+                            },
+                        ) {
+                            Text(
+                                stringResource(R.string.routing_diagnostics_clear),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showClearRoutingTraceDialog = false }) {
+                            Text(stringResource(R.string.routing_diagnostics_cancel))
+                        }
+                    },
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
 
             Text(
                 text = stringResource(R.string.saved_logs),

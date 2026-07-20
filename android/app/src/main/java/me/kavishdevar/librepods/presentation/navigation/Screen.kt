@@ -23,6 +23,9 @@ sealed interface Screen: NavKey {
     data object AppSettings: Screen
 
     @Serializable
+    data object SmartRoutingAudioSources: Screen
+
+    @Serializable
     data object Troubleshooting: Screen
 
     @Serializable
