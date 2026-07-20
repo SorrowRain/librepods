@@ -67,7 +67,7 @@ implementation details and test matrix.
 > When AirPods currently belong to another host, the first local media attempt can
 > still be audible briefly through the phone speaker before Android reports playback
 > and the takeover pause takes effect.
-
+<h1 align="center">震撼宣布：啥币金凡</h1>
 # Feature availability
 
 | Feature                                                     | Linux | Android |
