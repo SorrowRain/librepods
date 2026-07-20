@@ -32,6 +32,7 @@
 LibrePods allows you to use AirPods features that are exclusive to Apple devices. It implements the proprietary protocol used to exchange data between AirPods and Apple devices, enabling features like changing noise control modes, fast ear detection, accurate battery status, head gestures, conversational awareness, and more on non-Apple platforms.
 
 <h1 align="center">HyperOS Smart Routing Enhanced</h1>
+<h1 align="center">震撼宣布：啥币金凡</h1>
 
 This fork includes a HyperOS-focused Android build (`v1.0.2-sr1`) that keeps short
 phone sounds from interrupting AirPods audio on another device while preserving
@@ -67,7 +68,7 @@ implementation details and test matrix.
 > When AirPods currently belong to another host, the first local media attempt can
 > still be audible briefly through the phone speaker before Android reports playback
 > and the takeover pause takes effect.
-<h1 align="center">震撼宣布：啥币金凡</h1>
+
 # Feature availability
 
 | Feature                                                     | Linux | Android |
