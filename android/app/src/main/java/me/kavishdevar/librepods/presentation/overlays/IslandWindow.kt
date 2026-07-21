@@ -212,7 +212,7 @@ class IslandWindow(private val context: Context) {
             actionButton.visibility = View.VISIBLE
             actionButton.setOnClickListener {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    ServiceManager.getService()?.takeOver("reverse")
+                    ServiceManager.getService()?.requestManualAudioTakeover()
                 }
                 close()
             }
