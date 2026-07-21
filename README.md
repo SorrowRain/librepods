@@ -10,8 +10,8 @@
 </picture>
 
 <div align="center" style="margin: 20px 0px;">
-<a href="https://github.com/kavishdevar/librepods/releases/latest">
-  <img src="https://img.shields.io/github/downloads/kavishdevar/librepods/total?label=GitHub%20Downloads" />
+<a href="https://github.com/SorrowRain/librepods/releases/latest">
+  <img src="https://img.shields.io/github/downloads/SorrowRain/librepods/total?label=GitHub%20Downloads" />
 </a>
 <a href="https://github.com/kavishdevar/librepods/actions/workflows/ci-android.yml">
   <img src="https://github.com/kavishdevar/librepods/actions/workflows/ci-android.yml/badge.svg" />
@@ -34,7 +34,16 @@ LibrePods allows you to use AirPods features that are exclusive to Apple devices
 <h1 align="center">HyperOS Smart Routing Enhanced</h1>
 <h1 align="center">震撼宣布：啥币金凡</h1>
 
-This fork includes a HyperOS-focused Android build (`v1.0.2-sr1`) that keeps short
+> [!NOTE]
+> **Unofficial fork:** This repository is a modified fork of
+> [beidaoc/librepods](https://github.com/beidaoc/librepods), itself derived from the
+> [upstream LibrePods project](https://github.com/librepods-org/librepods). The HyperOS
+> changes are maintained by SorrowRain and were first published in July 2026. Original
+> copyrights remain with the LibrePods contributors. This fork remains licensed under
+> [GNU GPL v3 or later](LICENSE), and matching source is available from each release tag.
+> It is not affiliated with or endorsed by the original maintainers.
+
+This fork includes a HyperOS-focused Android build (`v1.0.2-hyperos.1`) that keeps short
 phone sounds from interrupting AirPods audio on another device while preserving
 intentional handoff for music and video.
 
@@ -45,8 +54,15 @@ intentional handoff for music and video.
 - **Keep on phone:** independently choose short-sound categories that must render
   through the built-in phone speaker. Notifications and system/charging sounds are
   protected by default.
-- **Confirmed handoff:** local media is paused during takeover and resumed only after
-  ownership, the AACP source, and the target A2DP connection are confirmed.
+- **Confirmed handoff:** local media is paused only when a known non-target route needs repair,
+  and the route watchdog is cancelled as soon as the physical route is local; a delayed ownership
+  bit cannot hold it paused. LibrePods does not synthesize a delayed `PLAY` after that guarded
+  pause, so one explicit play press resumes the track after the route is confirmed.
+- **Guarded ear-detection resume:** putting the AirPods back in the ears can resume a pause
+  owned by ear detection, but only after the media stream is quiet for 1.5 seconds and the
+  A2DP route is connected. A2DP disconnects suspend this resume until the route returns.
+- **Stable multipoint connection:** battery packets and remote playback no longer disable
+  Android profile auto-connect, and open/in-ear BLE events repair A2DP/HFP independently.
 - **Routing diagnostics:** an optional structured debug log records decisions and can
   be marked, exported, or cleared without collecting raw Bluetooth packets or logcat.
 - **HyperOS UI integration:** the foreground notification folds automatically and the

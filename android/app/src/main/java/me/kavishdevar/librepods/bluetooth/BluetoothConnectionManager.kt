@@ -24,9 +24,109 @@ import android.bluetooth.BluetoothSocket
 import android.os.ParcelUuid
 import android.util.Log
 
+class AacpSocketLease internal constructor(
+    val socket: BluetoothSocket,
+    val generation: Long,
+)
+
+internal object AacpSocketLeaseGate {
+    fun isCurrent(
+        currentSocket: Any?,
+        currentGeneration: Long,
+        leaseSocket: Any,
+        leaseGeneration: Long,
+    ): Boolean = currentSocket === leaseSocket && currentGeneration == leaseGeneration
+}
+
 object BluetoothConnectionManager {
+    @Volatile
     var aacpSocket: BluetoothSocket? = null
+        private set
+    @Volatile
     var attSocket: BluetoothSocket? = null
+    @Volatile
+    private var aacpSocketGeneration: Long = 0L
+
+    fun installAacpSocket(socket: BluetoothSocket): Long {
+        synchronized(this) {
+            val previousSocket = aacpSocket
+            val nextGeneration = aacpSocketGeneration + 1L
+            aacpSocket = socket
+            aacpSocketGeneration = nextGeneration
+            if (previousSocket != null && previousSocket !== socket) {
+                runCatching { previousSocket.close() }
+            }
+            return nextGeneration
+        }
+    }
+
+    @Synchronized
+    fun currentAacpSocketGeneration(): Long = aacpSocketGeneration
+
+    @Synchronized
+    fun currentAacpSocketLease(): AacpSocketLease? = aacpSocket?.let {
+        AacpSocketLease(socket = it, generation = aacpSocketGeneration)
+    }
+
+    @Synchronized
+    fun isCurrent(lease: AacpSocketLease): Boolean = AacpSocketLeaseGate.isCurrent(
+        currentSocket = aacpSocket,
+        currentGeneration = aacpSocketGeneration,
+        leaseSocket = lease.socket,
+        leaseGeneration = lease.generation,
+    )
+
+    /**
+     * Checks a lease and writes while holding the same lock used for socket replacement. This
+     * prevents a new generation from being installed between the identity check and the write.
+     */
+    fun writeAacpPacket(packet: ByteArray, expectedLease: AacpSocketLease?): Boolean =
+        synchronized(this) {
+            val socket = expectedLease?.socket ?: aacpSocket ?: return@synchronized false
+            if (expectedLease != null && !isCurrent(expectedLease)) return@synchronized false
+            if (!socket.isConnected) return@synchronized false
+            val output = socket.outputStream ?: return@synchronized false
+            output.write(packet)
+            output.flush()
+            true
+        }
+
+    fun invalidateAacpSocket(expectedSocket: BluetoothSocket? = aacpSocket) {
+        if (expectedSocket == null) return
+        synchronized(this) {
+            if (aacpSocket === expectedSocket) {
+                aacpSocket = null
+                aacpSocketGeneration++
+                runCatching { expectedSocket.close() }
+            }
+        }
+    }
+
+    fun invalidateAttSocket(expectedSocket: BluetoothSocket? = attSocket) {
+        if (expectedSocket == null) return
+        synchronized(this) {
+            if (attSocket === expectedSocket) {
+                attSocket = null
+            }
+        }
+        runCatching { expectedSocket.close() }
+    }
+
+    fun closeAacpGeneration(
+        expectedSocket: BluetoothSocket,
+        expectedGeneration: Long,
+    ): Boolean {
+        return synchronized(this) {
+            if (aacpSocketGeneration != expectedGeneration || aacpSocket !== expectedSocket) {
+                return@synchronized false
+            } else {
+                aacpSocket = null
+                aacpSocketGeneration++
+                runCatching { expectedSocket.close() }
+                true
+            }
+        }
+    }
 }
 
 fun createBluetoothSocket(

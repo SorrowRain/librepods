@@ -23,6 +23,9 @@ package me.kavishdevar.librepods.bluetooth
 import android.util.Log
 import me.kavishdevar.librepods.data.Capability
 import me.kavishdevar.librepods.data.CustomEq
+import me.kavishdevar.librepods.data.LocalHostIdentity
+import me.kavishdevar.librepods.data.SmartRoutingTargetResolver
+import me.kavishdevar.librepods.data.TakeoverAudioSource
 import me.kavishdevar.librepods.diagnostics.AacpOperation
 import me.kavishdevar.librepods.diagnostics.AacpSendOutcome
 import me.kavishdevar.librepods.diagnostics.RoutingCorrelation
@@ -33,6 +36,65 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.io.encoding.ExperimentalEncodingApi
 
+enum class TakeoverPacketSequenceMode {
+    FULL,
+    MEDIA_AND_HIJACK,
+}
+
+enum class TakeoverPacketSourcePolicy {
+    INITIAL_NON_LOCAL,
+    RETRY_KNOWN_NON_LOCAL,
+}
+
+enum class TakeoverPacketStage {
+    OWNERSHIP,
+    MEDIA_INFORMATION,
+    HIJACK_REQUEST,
+}
+
+enum class TakeoverPacketSequenceFailure {
+    SOURCE_REJECTED,
+    PERMIT_REVOKED,
+    SOCKET_STALE,
+    INVALID_TARGET,
+    WRITE_FAILED,
+}
+
+data class TakeoverPacketSequenceResult(
+    val mode: TakeoverPacketSequenceMode,
+    val ownershipSent: Boolean? = null,
+    val mediaInformationSent: Boolean = false,
+    val hijackSent: Boolean = false,
+    val failedStage: TakeoverPacketStage? = null,
+    val failure: TakeoverPacketSequenceFailure? = null,
+) {
+    val completed: Boolean
+        get() = failure == null &&
+            (mode == TakeoverPacketSequenceMode.MEDIA_AND_HIJACK || ownershipSent == true) &&
+            mediaInformationSent &&
+            hijackSent
+}
+
+object TakeoverPacketSequencePlan {
+    fun stages(mode: TakeoverPacketSequenceMode): List<TakeoverPacketStage> = when (mode) {
+        TakeoverPacketSequenceMode.FULL -> listOf(
+            TakeoverPacketStage.OWNERSHIP,
+            TakeoverPacketStage.MEDIA_INFORMATION,
+            TakeoverPacketStage.HIJACK_REQUEST,
+        )
+        TakeoverPacketSequenceMode.MEDIA_AND_HIJACK -> listOf(
+            TakeoverPacketStage.MEDIA_INFORMATION,
+            TakeoverPacketStage.HIJACK_REQUEST,
+        )
+    }
+}
+
+internal class AacpPacketWriteCoordinator {
+    private val lock = Any()
+
+    fun <T> runExclusive(block: () -> T): T = synchronized(lock, block)
+}
+
 /**
  * Manager class for Apple Accessory Communication Protocol (AACP)
  * This class is responsible for handling the L2CAP socket management,
@@ -40,6 +102,7 @@ import kotlin.io.encoding.ExperimentalEncodingApi
  */
 class AACPManager {
     private val TAG = "AACPManager[${System.identityHashCode(this)}]"
+    private val packetWriteCoordinator = AacpPacketWriteCoordinator()
     companion object {
         @Suppress("unused")
         object Opcodes {
@@ -202,6 +265,9 @@ class AACPManager {
         private set
 
     @Volatile
+    private var rememberedConnectedDevices: List<ConnectedDevice> = listOf()
+
+    @Volatile
     var audioSource: AudioSource? = null
         private set
 
@@ -315,7 +381,9 @@ class AACPManager {
     }
 
     fun sendDataPacket(data: ByteArray): Boolean {
-        return sendPacket(createDataPacket(data))
+        return packetWriteCoordinator.runExclusive {
+            sendPacketLocked(createDataPacket(data), expectedLease = null)
+        }
     }
 
     fun sendControlCommand(
@@ -323,16 +391,29 @@ class AACPManager {
         value: ByteArray,
         correlation: RoutingCorrelation = RoutingCorrelation(),
         reason: String? = null,
+    ): Boolean = packetWriteCoordinator.runExclusive {
+        sendControlCommandLocked(identifier, value, correlation, reason, expectedLease = null)
+    }
+
+    private fun sendControlCommandLocked(
+        identifier: Byte,
+        value: ByteArray,
+        correlation: RoutingCorrelation,
+        reason: String?,
+        expectedLease: AacpSocketLease?,
     ): Boolean {
         val controlPacket = createControlCommandPacket(identifier, value)
         val commandIdentifier = ControlCommandIdentifiers.fromByte(identifier) ?: return false
         if (commandIdentifier == ControlCommandIdentifiers.OWNS_CONNECTION) {
             requestedOwnership = value.firstOrNull() == 0x01.toByte()
         }
-        val sent = sendDataPacket(controlPacket)
+        val sent = sendPacketLocked(createDataPacket(controlPacket), expectedLease)
         if (commandIdentifier == ControlCommandIdentifiers.OWNS_CONNECTION && !sent) {
             requestedOwnership = null
         }
+        val socketConnected = expectedLease?.let {
+            BluetoothConnectionManager.isCurrent(it) && it.socket.isConnected
+        } ?: (BluetoothConnectionManager.aacpSocket?.isConnected == true)
         RoutingTrace.record(
             if (sent) RoutingSeverity.INFO else RoutingSeverity.WARNING,
             correlation
@@ -345,11 +426,11 @@ class AACPManager {
                 },
                 outcome = when {
                     sent -> AacpSendOutcome.SENT
-                    BluetoothConnectionManager.aacpSocket?.isConnected != true ->
+                    !socketConnected ->
                         AacpSendOutcome.SOCKET_UNAVAILABLE
                     else -> AacpSendOutcome.WRITE_FAILED
                 },
-                socketConnected = BluetoothConnectionManager.aacpSocket?.isConnected == true,
+                socketConnected = socketConnected,
                 requestedValue = if (commandIdentifier == ControlCommandIdentifiers.OWNS_CONNECTION) {
                     value.firstOrNull()?.toInt()
                 } else {
@@ -359,6 +440,147 @@ class AACPManager {
             )
         }
         return sent
+    }
+
+    fun sendTakeoverPacketSequence(
+        selfMacAddress: String,
+        targetMacAddresses: List<String>,
+        lease: AacpSocketLease,
+        mode: TakeoverPacketSequenceMode,
+        sourcePolicy: TakeoverPacketSourcePolicy,
+        correlation: RoutingCorrelation,
+        reason: String,
+        packetPermit: (() -> Boolean)? = null,
+    ): TakeoverPacketSequenceResult = packetWriteCoordinator.runExclusive {
+        val targets = targetMacAddresses.distinct()
+        val validMac = Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
+        if (!validMac.matches(selfMacAddress) ||
+            targets.isEmpty() ||
+            targets.any { !validMac.matches(it) }
+        ) {
+            return@runExclusive TakeoverPacketSequenceResult(
+                mode = mode,
+                failure = TakeoverPacketSequenceFailure.INVALID_TARGET,
+            )
+        }
+
+        fun sourceAllowed(): Boolean {
+            val source = audioSource
+            val classified = when {
+                source == null -> TakeoverAudioSource.UNKNOWN
+                source.type == AudioSourceType.NONE -> TakeoverAudioSource.NONE
+                else -> LocalHostIdentity.classifyKnownSource(selfMacAddress, source.mac)
+            }
+            return when (sourcePolicy) {
+                TakeoverPacketSourcePolicy.INITIAL_NON_LOCAL ->
+                    classified != TakeoverAudioSource.LOCAL
+                TakeoverPacketSourcePolicy.RETRY_KNOWN_NON_LOCAL ->
+                    classified == TakeoverAudioSource.NONE ||
+                        classified == TakeoverAudioSource.REMOTE
+            }
+        }
+
+        fun rejected(stage: TakeoverPacketStage): TakeoverPacketSequenceResult? = when {
+            !BluetoothConnectionManager.isCurrent(lease) -> TakeoverPacketSequenceResult(
+                mode = mode,
+                failedStage = stage,
+                failure = TakeoverPacketSequenceFailure.SOCKET_STALE,
+            )
+            packetPermit?.invoke() == false -> TakeoverPacketSequenceResult(
+                mode = mode,
+                failedStage = stage,
+                failure = TakeoverPacketSequenceFailure.PERMIT_REVOKED,
+            )
+            !sourceAllowed() -> TakeoverPacketSequenceResult(
+                mode = mode,
+                failedStage = stage,
+                failure = TakeoverPacketSequenceFailure.SOURCE_REJECTED,
+            )
+            else -> null
+        }
+
+        var ownershipSent: Boolean? = null
+        if (mode == TakeoverPacketSequenceMode.FULL) {
+            rejected(TakeoverPacketStage.OWNERSHIP)?.let { return@runExclusive it }
+            ownershipSent = sendControlCommandLocked(
+                identifier = ControlCommandIdentifiers.OWNS_CONNECTION.value,
+                value = byteArrayOf(0x01),
+                correlation = correlation,
+                reason = reason,
+                expectedLease = lease,
+            )
+            if (!ownershipSent) {
+                return@runExclusive TakeoverPacketSequenceResult(
+                    mode = mode,
+                    ownershipSent = false,
+                    failedStage = TakeoverPacketStage.OWNERSHIP,
+                    failure = if (BluetoothConnectionManager.isCurrent(lease)) {
+                        TakeoverPacketSequenceFailure.WRITE_FAILED
+                    } else {
+                        TakeoverPacketSequenceFailure.SOCKET_STALE
+                    },
+                )
+            }
+        }
+
+        rejected(TakeoverPacketStage.MEDIA_INFORMATION)?.let {
+            return@runExclusive it.copy(ownershipSent = ownershipSent)
+        }
+        val mediaInformationSent = sendPacketLocked(
+            createDataPacket(
+                createMediaInformationPacket(
+                    selfMacAddress = selfMacAddress,
+                    targetMacAddress = targets.first(),
+                    streamingState = true,
+                )
+            ),
+            expectedLease = lease,
+        )
+        if (!mediaInformationSent) {
+            return@runExclusive TakeoverPacketSequenceResult(
+                mode = mode,
+                ownershipSent = ownershipSent,
+                failedStage = TakeoverPacketStage.MEDIA_INFORMATION,
+                failure = if (BluetoothConnectionManager.isCurrent(lease)) {
+                    TakeoverPacketSequenceFailure.WRITE_FAILED
+                } else {
+                    TakeoverPacketSequenceFailure.SOCKET_STALE
+                },
+            )
+        }
+
+        for (target in targets) {
+            rejected(TakeoverPacketStage.HIJACK_REQUEST)?.let {
+                return@runExclusive it.copy(
+                    ownershipSent = ownershipSent,
+                    mediaInformationSent = true,
+                )
+            }
+            if (!sendPacketLocked(
+                    createDataPacket(createHijackRequestPacket(target)),
+                    expectedLease = lease,
+                )
+            ) {
+                return@runExclusive TakeoverPacketSequenceResult(
+                    mode = mode,
+                    ownershipSent = ownershipSent,
+                    mediaInformationSent = true,
+                    failedStage = TakeoverPacketStage.HIJACK_REQUEST,
+                    failure = if (BluetoothConnectionManager.isCurrent(lease)) {
+                        TakeoverPacketSequenceFailure.WRITE_FAILED
+                    } else {
+                        TakeoverPacketSequenceFailure.SOCKET_STALE
+                    },
+                )
+            }
+        }
+
+        TakeoverPacketSequenceResult(
+            mode = mode,
+            ownershipSent = ownershipSent,
+            mediaInformationSent = true,
+            hijackSent = true,
+        )
     }
 
     @OptIn(ExperimentalStdlibApi::class)
@@ -512,6 +734,9 @@ class AACPManager {
             Opcodes.CONNECTED_DEVICES -> {
                 oldConnectedDevices = connectedDevices
                 connectedDevices = parseConnectedDevicesResponse(packet)
+                if (connectedDevices.isNotEmpty()) {
+                    rememberedConnectedDevices = connectedDevices.map { it.copy() }
+                }
                 callback?.onConnectedDevicesReceived(connectedDevices)
             }
 
@@ -858,18 +1083,34 @@ class AACPManager {
         return opcode + buffer.array()
     }
 
+    fun resolveSmartRoutingTarget(selfMacAddress: String): String? =
+        resolveSmartRoutingTargets(selfMacAddress).firstOrNull()
+
+    fun resolveSmartRoutingTargets(selfMacAddress: String): List<String> =
+        SmartRoutingTargetResolver.resolveTargets(
+            selfAddress = selfMacAddress,
+            activeSourceAddress = audioSource
+                ?.takeUnless { it.type == AudioSourceType.NONE }
+                ?.mac,
+            currentDeviceAddresses = connectedDevices.map { it.mac },
+            rememberedDeviceAddresses = rememberedConnectedDevices.map { it.mac },
+        )
+
     fun sendHijackRequest(selfMacAddress: String): Boolean {
         if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
             // throw IllegalArgumentException("MAC address must be 6 bytes")
             Log.w(TAG, "Invalid MAC address format, got: selfMacAddress=$selfMacAddress")
             return false
         }
-        var success = false
-        for (connectedDevice in connectedDevices) {
-            if (connectedDevice.mac != selfMacAddress) {
-                Log.d(TAG, "Sending Hijack Request packet to ${connectedDevice.mac}")
-                success = sendDataPacket(createHijackRequestPacket(connectedDevice.mac)) || success
-            }
+        val targets = resolveSmartRoutingTargets(selfMacAddress)
+        if (targets.isEmpty()) {
+            Log.w(TAG, "Cannot send Hijack Request packet: No remote Smart Routing host known")
+            return false
+        }
+        var success = true
+        for (target in targets) {
+            Log.d(TAG, "Sending Hijack Request packet to $target")
+            success = sendDataPacket(createHijackRequestPacket(target)) && success
         }
         return success
     }
@@ -908,9 +1149,9 @@ class AACPManager {
             return false
         }
         Log.d(TAG, "SELFMAC: $selfMacAddress")
-        val targetMac = connectedDevices.find { it.mac != selfMacAddress }?.mac
+        val targetMac = resolveSmartRoutingTarget(selfMacAddress)
         if (targetMac == null) {
-            Log.w(TAG, "Cannot send Media Information packet: No connected device found")
+            Log.w(TAG, "Cannot send Media Information packet: No remote Smart Routing host known")
             return false
         }
         Log.d(TAG, "Sending Media Information packet to $targetMac")
@@ -965,9 +1206,9 @@ class AACPManager {
             return false
         }
 
-        val targetMac = connectedDevices.find { it.mac != selfMacAddress }?.mac
+        val targetMac = resolveSmartRoutingTarget(selfMacAddress)
         if (targetMac == null) {
-            Log.w(TAG, "Cannot send Smart Routing Show UI packet: No connected device found")
+            Log.w(TAG, "Cannot send Smart Routing Show UI packet: No remote Smart Routing host known")
             return false
         }
         Log.d(TAG, "Sending Smart Routing Show UI packet to $targetMac")
@@ -1003,12 +1244,15 @@ class AACPManager {
     }
 
     fun sendHijackReversed(selfMacAddress: String): Boolean {
-        var success = false
-        for (connectedDevice in connectedDevices) {
-            if (connectedDevice.mac != selfMacAddress) {
-                Log.d(TAG, "Sending Hijack Reversed packet to ${connectedDevice.mac}")
-                success = sendDataPacket(createHijackReversedPacket(connectedDevice.mac)) || success
-            }
+        val targets = resolveSmartRoutingTargets(selfMacAddress)
+        if (targets.isEmpty()) {
+            Log.w(TAG, "Cannot send Hijack Reversed packet: No remote Smart Routing host known")
+            return false
+        }
+        var success = true
+        for (target in targets) {
+            Log.d(TAG, "Sending Hijack Reversed packet to $target")
+            success = sendDataPacket(createHijackReversedPacket(target)) && success
         }
         return success
     }
@@ -1140,9 +1384,27 @@ class AACPManager {
     }
 
     @OptIn(ExperimentalStdlibApi::class)
-    @Synchronized
-    fun sendPacket(packet: ByteArray): Boolean {
+    fun sendPacket(packet: ByteArray): Boolean = packetWriteCoordinator.runExclusive {
+        sendPacketLocked(packet, expectedLease = null)
+    }
+
+    @OptIn(ExperimentalStdlibApi::class)
+    private fun sendPacketLocked(
+        packet: ByteArray,
+        expectedLease: AacpSocketLease?,
+    ): Boolean {
+        // Bind every write, including ordinary control traffic, to the generation observed at
+        // entry. A replacement cannot make an old write close or target the new socket.
+        val effectiveLease = expectedLease ?: BluetoothConnectionManager.currentAacpSocketLease()
+        val activeSocket = effectiveLease?.socket
+        if (packet.size < 5) {
+            Log.w(TAG, "Refusing malformed AACP packet (${packet.size} bytes)")
+            return false
+        }
         try {
+            if (effectiveLease != null && !BluetoothConnectionManager.isCurrent(effectiveLease)) {
+                return false
+            }
             if (packet[4] == Opcodes.CONTROL_COMMAND) {
                 val controlCommand = try {
                     ControlCommand.fromByteArray(packet)
@@ -1158,18 +1420,20 @@ class AACPManager {
                 )
             }
 
-            val socket = BluetoothConnectionManager.aacpSocket ?: return false
-
-            if (socket.isConnected) {
-                val output = socket.outputStream ?: return false
-                output.write(packet)
-                output.flush()
+            if (BluetoothConnectionManager.writeAacpPacket(packet, effectiveLease)) {
                 return true
-            } else {
-                Log.d(TAG, "Can't send packet: Socket not initialized or connected")
-                return false
             }
+            Log.d(TAG, "Can't send packet: Socket not initialized or connected")
+            return false
         } catch (e: Exception) {
+            if (effectiveLease != null) {
+                BluetoothConnectionManager.closeAacpGeneration(
+                    expectedSocket = effectiveLease.socket,
+                    expectedGeneration = effectiveLease.generation,
+                )
+            } else {
+                BluetoothConnectionManager.invalidateAacpSocket(activeSocket)
+            }
             Log.e(TAG, "Error sending packet: ${e.message}")
             return false
         }
@@ -1270,7 +1534,10 @@ class AACPManager {
         controlCommandListeners.clear()
         owns = false
         requestedOwnership = null
-        oldConnectedDevices = listOf()
+        if (connectedDevices.isNotEmpty()) {
+            rememberedConnectedDevices = connectedDevices.map { it.copy() }
+        }
+        oldConnectedDevices = connectedDevices
         connectedDevices = listOf()
         audioSource = null
     }

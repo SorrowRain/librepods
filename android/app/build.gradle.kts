@@ -1,7 +1,7 @@
 import java.util.Properties
 import java.util.zip.ZipFile
 
-val appVersionName = "1.0.2-sr1"
+val appVersionName = "1.0.2-hyperos.1"
 
 plugins {
     alias(libs.plugins.android.application)
@@ -50,7 +50,7 @@ android {
     defaultConfig {
         applicationId = "me.kavishdevar.librepods"
         targetSdk = 37
-        versionCode = 69
+        versionCode = 76
         versionName = appVersionName
     }
     buildTypes {
@@ -172,6 +172,7 @@ aboutLibraries {
 }
 
 val rootModuleDir = rootProject.file("../root-module-manual")
+val licenseFile = rootProject.file("../LICENSE")
 val releaseDir = rootProject.file("../release")
 val headTrackerSource = rootProject.file("tools/headtracker-uhid/headtracker_uhid.cpp")
 val headTrackerOutput = layout.buildDirectory.file(
@@ -226,6 +227,7 @@ fun registerRootModuleZipTask(
     val apkFile = layout.buildDirectory.file(apkPath)
 
     from(rootModuleDir)
+    from(licenseFile)
 
     duplicatesStrategy = DuplicatesStrategy.WARN
 

@@ -59,7 +59,10 @@ class BLEManager(private val context: Context) {
         val lidOpen: Boolean = false,
         val color: String = "Unknown",
         val connectionState: String = "Unknown"
-    )
+    ) {
+        fun hasSameObservableState(other: AirPodsStatus): Boolean =
+            copy(lastSeen = other.lastSeen) == other
+    }
 
     fun getMostRecentStatus(): AirPodsStatus? {
         return deviceStatusMap.values.maxByOrNull { it.lastSeen }
@@ -295,7 +298,7 @@ class BLEManager(private val context: Context) {
                         Log.d(TAG, "Lid state ${if (parsedStatus.lidOpen) "opened" else "closed"} (detected from new device)")
                     }
                 } else {
-                    if (parsedStatus != previousStatus) {
+                    if (!parsedStatus.hasSameObservableState(previousStatus)) {
                         listener.onDeviceStatusChanged(parsedStatus, previousStatus)
                     }
 
@@ -408,9 +411,12 @@ class BLEManager(private val context: Context) {
 
     private fun checkLidStateTimeout() {
         val currentTime = System.currentTimeMillis()
-        if (currentTime - lastBroadcastTime > LID_CLOSE_TIMEOUT_MS && currentGlobalLidState == true) {
+        if (shouldInferLidClosed(currentTime, lastBroadcastTime, currentGlobalLidState)) {
             Log.d(TAG, "No broadcasts for ${LID_CLOSE_TIMEOUT_MS}ms, forcing lid state to closed")
             currentGlobalLidState = false
+            deviceStatusMap.entries.forEach { entry ->
+                entry.setValue(markLidClosedAfterTimeout(entry.value))
+            }
             airPodsStatusListener?.onLidStateChanged(false)
         }
     }
@@ -491,8 +497,17 @@ class BLEManager(private val context: Context) {
 
     companion object {
         private const val TAG = "AirPodsBLE"
-        private const val CLEANUP_INTERVAL_MS = 10000L
+        private const val CLEANUP_INTERVAL_MS = 1000L
         private const val STALE_DEVICE_TIMEOUT_MS = 15000L
-        private const val LID_CLOSE_TIMEOUT_MS = 2500L
+        internal const val LID_CLOSE_TIMEOUT_MS = 8000L
+
+        internal fun shouldInferLidClosed(
+            now: Long,
+            lastBroadcastAt: Long,
+            lidOpen: Boolean?,
+        ): Boolean = lidOpen == true && now - lastBroadcastAt > LID_CLOSE_TIMEOUT_MS
+
+        internal fun markLidClosedAfterTimeout(status: AirPodsStatus): AirPodsStatus =
+            if (status.lidOpen) status.copy(lidOpen = false) else status
     }
 }

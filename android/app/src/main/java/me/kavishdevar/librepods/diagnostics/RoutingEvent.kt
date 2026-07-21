@@ -89,6 +89,7 @@ data class PlaybackConfigurationTrace(
     val contentTypeName: String,
     val outputDeviceType: Int? = null,
     val outputDeviceTypeName: String? = null,
+    val targetDeviceMatched: Boolean? = null,
     val playerState: Int? = null,
     val playerStateName: String? = null,
     val policyEnabled: Boolean,
@@ -110,6 +111,7 @@ sealed interface RoutingEventDetail {
         val configurationCount: Int,
         val eligibleConfigurationCount: Int,
         val eligiblePlaybackActive: Boolean,
+        val eligiblePlaybackRoutedToTarget: Boolean,
     ) : RoutingEventDetail {
         override val eventName = "playback_snapshot"
     }

@@ -65,6 +65,8 @@ internal object RoutingEventEncoder {
                 writer.name("eligible_configuration_count")
                     .value(detail.eligibleConfigurationCount.toLong())
                 writer.name("eligible_playback_active").value(detail.eligiblePlaybackActive)
+                writer.name("eligible_playback_routed_to_target")
+                    .value(detail.eligiblePlaybackRoutedToTarget)
                 writer.name("configurations").beginArray()
                 detail.configurations.take(MAX_COLLECTION_SIZE).forEach { configuration ->
                     writer.beginObject()
@@ -78,6 +80,9 @@ internal object RoutingEventEncoder {
                     }
                     configuration.outputDeviceTypeName?.let {
                         writer.name("output_device_type_name").value(sanitize(it))
+                    }
+                    configuration.targetDeviceMatched?.let {
+                        writer.name("target_device_matched").value(it)
                     }
                     configuration.playerState?.let {
                         writer.name("player_state").value(it.toLong())

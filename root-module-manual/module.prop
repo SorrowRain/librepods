@@ -1,6 +1,6 @@
 id=librepods
 name=LibrePods
-version=v1.0.2-sr1
-versionCode=69
+version=v1.0.2-hyperos.1
+versionCode=76
 author=@kavishdevar
 description=Installs LibrePods as a system app, grants private audio-routing permissions, and provides the root head-tracker helper.
