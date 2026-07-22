@@ -8,6 +8,16 @@ import me.kavishdevar.librepods.presentation.screens.EqualizerScreenPreviewMater
 import me.kavishdevar.librepods.presentation.theme.DesignSystem
 import me.kavishdevar.librepods.presentation.theme.LocalDesignSystem
 
+val update1_0_2RemoteGuard = listOf(
+    UpdateItem(
+        titleRes = R.string.update_remote_device_audio_guard,
+        descriptionRes = R.string.update_remote_device_audio_guard_description,
+        demoComposeable = @Composable {
+            AirPodsSettingsScreenPreviewMaterial()
+        }
+    )
+)
+
 val update1_0_0 = listOf(
         UpdateItem(
             titleRes = R.string.material3e,
@@ -32,4 +42,4 @@ val update1_0_0 = listOf(
         ),
     )
 
-val updates = update1_0_0
+val updates = update1_0_2RemoteGuard + update1_0_0

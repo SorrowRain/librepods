@@ -126,19 +126,6 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
-        <service
-            android:name=".services.AudioRoutingQSService"
-            android:exported="true"
-            android:icon="@drawable/airpods"
-            android:label="@string/audio_route_tile_label"
-            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
-            <meta-data
-                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
-                android:value="true" />
-            <intent-filter>
-                <action android:name="android.service.quicksettings.action.QS_TILE" />
-            </intent-filter>
-        </service>
 <!--        <service-->
 <!--            android:name=".services.AppListenerService"-->
 <!--            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"-->

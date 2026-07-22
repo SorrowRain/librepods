@@ -8,7 +8,6 @@ import io.github.libxposed.service.XposedService
 import io.github.libxposed.service.XposedServiceHelper
 import me.kavishdevar.librepods.billing.BillingManager
 import me.kavishdevar.librepods.billing.BillingProviderFactory
-import me.kavishdevar.librepods.diagnostics.RoutingTrace
 import me.kavishdevar.librepods.utils.XposedServiceHolder
 import me.kavishdevar.librepods.utils.XposedState
 
@@ -16,7 +15,6 @@ class LibrePodsApplication: Application(), XposedServiceHelper.OnServiceListener
 
     override fun onCreate() {
         super<Application>.onCreate()
-        RoutingTrace.initialize(this)
         XposedServiceHelper.registerListener(this)
         BillingManager.provider = BillingProviderFactory.create(this)
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)

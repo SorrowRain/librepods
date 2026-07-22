@@ -44,10 +44,6 @@
     <string name="noise_control_widget_description">Controle o Modo de Controle de Ruído diretamente da sua Tela Inicial.</string>
     <string name="island_connected_text">Conectado</string>
     <string name="island_connected_remote_text">Conectado ao Linux</string>
-    <string name="island_taking_over_text">Conectado</string>
-    <string name="island_moved_to_remote_text">Movido para Linux</string>
-    <string name="island_moved_to_other_device_text">Movido para %1$s</string>
-    <string name="island_moved_to_other_device_reversed_text">Reconectar pela notificação</string>
     <string name="head_tracking">Rastreamento de Cabeça</string>
     <string name="head_gestures_details">Acene para atender chamadas e balance a cabeça para recusar.</string>
     <string name="general_settings_header">Geral</string>
@@ -65,22 +61,6 @@
     <string name="collect_logs">Coletar Logs</string>
     <string name="saved_logs">Logs Salvos</string>
     <string name="no_logs_found">Nenhum log salvo encontrado</string>
-    <string name="takeover_header">Preferências de Auto-conexão</string>
-    <string name="takeover_airpods_state">Conectar aos seus AirPods quando o status for:</string>
-    <string name="takeover_disconnected">Desconectado</string>
-    <string name="takeover_disconnected_desc">Os AirPods não estão conectados a um dispositivo</string>
-    <string name="takeover_idle">Inativo</string>
-    <string name="takeover_idle_desc">Um dispositivo está conectado aos seus AirPods, mas não está reproduzindo mídia ou em uma chamada</string>
-    <string name="takeover_music">Reproduzindo mídia</string>
-    <string name="takeover_music_desc">Um dispositivo está reproduzindo mídia nos seus AirPods</string>
-    <string name="takeover_call">Em chamada</string>
-    <string name="takeover_call_desc">Um dispositivo está em uma chamada com seus AirPods</string>
-    <string name="takeover_phone_state">Conectar aos AirPods quando seu telefone estiver:</string>
-    <string name="takeover_ringing_call">Recebendo uma chamada</string>
-    <string name="takeover_ringing_call_desc">Seu telefone começa a tocar</string>
-    <string name="takeover_media_start">Iniciando reprodução de mídia</string>
-    <string name="takeover_media_start_desc">Seu telefone começa a reproduzir mídia</string>
-    <string name="undo">Desfazer</string>
     <string name="customize_transparency_mode_description">Você pode personalizar o modo de Transparência para seus AirPods Pro para ajudá-lo a ouvir o que está ao seu redor.</string>
     <string name="loud_sound_reduction_description">A Redução de Som Alto pode reduzir ativamente sua exposição a ruídos ambientais altos quando estiver nos modos Transparência e Adaptativo. A Redução de Som Alto não está ativa no modo Desligado.</string>
     <string name="loud_sound_reduction">Redução de Som Alto</string>
@@ -214,5 +194,5 @@
     <string name="show_bottom_sheet_popup">Pop-up inferior</string>
     <string name="show_bottom_sheet_popup_description">Exibe o pop-up estilo iOS na parte inferior quando os AirPods se conectam.</string>
     <string name="show_island_popup">Pop-up Dynamic Island</string>
-    <string name="show_island_popup_description">Exibe o pop-up estilo Dynamic Island no topo da tela em eventos de conexão e transferência.</string>
+    <string name="show_island_popup_description">Exibe o pop-up estilo Dynamic Island no topo da tela em eventos de conexão.</string>
 </resources>

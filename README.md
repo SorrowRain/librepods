@@ -31,7 +31,7 @@
 
 LibrePods allows you to use AirPods features that are exclusive to Apple devices. It implements the proprietary protocol used to exchange data between AirPods and Apple devices, enabling features like changing noise control modes, fast ear detection, accurate battery status, head gestures, conversational awareness, and more on non-Apple platforms.
 
-<h1 align="center">HyperOS Smart Routing Enhanced</h1>
+<h1 align="center">HyperOS First-Connected Audio Protection</h1>
 <h1 align="center">震撼宣布：啥币金凡</h1>
 
 > [!NOTE]
@@ -43,47 +43,37 @@ LibrePods allows you to use AirPods features that are exclusive to Apple devices
 > [GNU GPL v3 or later](LICENSE), and matching source is available from each release tag.
 > It is not affiliated with or endorsed by the original maintainers.
 
-This fork includes a HyperOS-focused Android build (`v1.0.2-hyperos.1`) that keeps short
-phone sounds from interrupting AirPods audio on another device while preserving
-intentional handoff for music and video.
+This fork includes a HyperOS-focused Android build (`v1.0.2-remote-guard.1`) for
+AirPods connected to an Android phone and one other device at the same time.
 
-## HyperOS changes
+## Phase 1 routing policy
 
-- **Automatic takeover allowlist:** choose which Android audio categories may move
-  AirPods to the phone. Media is the only category enabled by default.
-- **Keep on phone:** independently choose short-sound categories that must render
-  through the built-in phone speaker. Notifications and system/charging sounds are
-  protected by default.
-- **Confirmed handoff:** local media is paused only when a known non-target route needs repair,
-  and the route watchdog is cancelled as soon as the physical route is local; a delayed ownership
-  bit cannot hold it paused. LibrePods does not synthesize a delayed `PLAY` after that guarded
-  pause, so one explicit play press resumes the track after the route is confirmed.
-- **Guarded ear-detection resume:** putting the AirPods back in the ears can resume a pause
-  owned by ear detection, but only after the media stream is quiet for 1.5 seconds and the
-  A2DP route is connected. A2DP disconnects suspend this resume until the route returns.
-- **Stable multipoint connection:** battery packets and remote playback no longer disable
-  Android profile auto-connect, and open/in-ear BLE events repair A2DP/HFP independently.
-- **Routing diagnostics:** an optional structured debug log records decisions and can
-  be marked, exported, or cleared without collecting raw Bluetooth packets or logcat.
+- **First-connected protection:** while AirPods report that the other connected host is
+  playing media or handling a call, Android media and short sounds stay on the phone
+  speaker instead of opening an A2DP stream that can interrupt it.
+- **Broad non-call coverage:** media, games, notifications, alarms, navigation,
+  assistants, accessibility audio, and system sounds are protected by one switch,
+  enabled by default. There is no per-category policy in Phase 1.
+- **Calls pass through:** phone calls and app call audio are deliberately not
+  intercepted. They may still move AirPods to Android; call- and app-specific routing
+  belongs to Phase 2.
+- **No automatic takeover requests:** the previous playback-triggered ownership,
+  reconnect, recovery, category, and audio-owner tile state machines have been removed.
+- **HyperOS protection retained:** the Xiaomi Bluetooth hooks continue to block
+  HyperOS Fast Connect, AirCore, scan, transport-command, and vendor AirPods takeover
+  paths while preserving the Apple identity required for two-device connectivity.
 - **HyperOS UI integration:** the foreground notification folds automatically and the
   app is hidden from the recent-apps screen.
-- **Safer local identity handling:** invalid or unavailable local Bluetooth addresses
-  fail closed instead of being mistaken for a remote host.
 
-The two audio policies are intentionally independent. Disabling automatic takeover
-does not by itself force a sound to the phone speaker; select that category under
-**Keep on phone** when speaker-only routing is required.
-
-The speaker-routing policy requires the matching LibrePods Root module because it
-uses the privileged Android `AudioPolicy` API. Smart Routing takeover also requires
-the existing Xposed VendorID spoofing option. See the
-[routing design and verification notes](docs/android-audio-routing-plan.md) for the
-implementation details and test matrix.
+Other-device audio protection requires the Root module ZIP built from the same release
+as the APK because it uses privileged Android audio routing and Bluetooth-process
+integration. Multi-device connectivity also requires the existing Xposed **Act as an
+Apple device** option.
 
 > [!NOTE]
-> When AirPods currently belong to another host, the first local media attempt can
-> still be audible briefly through the phone speaker before Android reports playback
-> and the takeover pause takes effect.
+> This policy is intentionally asymmetric. It protects an active second device from
+> ordinary Android audio; it does not try to stop that device from taking AirPods that
+> Android is using.
 
 # Feature availability
 
@@ -102,7 +92,7 @@ implementation details and test matrix.
 | Multi-device connectivity (Bluetooth Multipoint; 2 devices only) | ⚪     | ⚪       |
 | <details><summary>Other accessibility configs (click to expand)</summary><ul><li>Press speed</li><li>Press and Hold duration</li><li>Noise Cancellation with single AirPod</li><li>Volume control on swipe</li><li>Volume swipe speed</li></ul></details>       | 🔴     | ✅       |
 | <details><summary>Other general configs</summary><ul><li>Press and Hold to cycle between listening modes/invoke digital assistant (invoking digital assistant needs a recent firmware)</li><li>Configure call controls</li><li>Personalized volume</li><li>Loud Sound Reduction (needs <a href="#vendorid-spoofing">VendorID spoofing</a>)</li><li>Microphone side</li><li>Pause media when falling asleep (needs a recent firmware)</li><li>Enable <code>Off listening mode</code> to switch to <code>Off</code></li></ul></details>                   | 🔴     | ✅       |
-| [Head-tracked Spatial Audio](#spatial-audio)                | ❓     | ❓       |
+| [Head-tracked Spatial Audio](#spatial-audio)                | ❓     | ✅       |
 | [Heart Rate Monitoring](#heart-rate-monitoring)             | ⛔     | 🔴       |
 | [Find My](#find-my)                                         | ❓     | ❓       |
 | [High quality two-way audio](#high-quality-two-way-audio)   | 🔴     | 🔴       |
@@ -126,9 +116,10 @@ The following features related to Find My are planned, but require further RE an
 
 ## Spatial Audio
 
-The app does not currently provide head tracking information to Android for the OS to perform HRTF. This has not been explored completely, and it might need root. 
-
-Spatializing stereo sound is beyond this project's scope and will never be available. Many OEMs have an implementation of their own for this.
+The Android app can forward AirPods head-tracking data to Android's compatible
+Spatializer implementation. This requires root, `/dev/uhid`, platform Spatializer
+support, and the Root module ZIP built from the same release as the APK. Fixed spatial
+audio can still depend on the device manufacturer's Android audio implementation.
 
 ## Heart Rate Monitoring (AirPods Pro 3 and later)
 This is being worked upon, check the #⁠reverse-engineering channel on the LibrePods Discord server for more information. If it is ever implemented, it will most likely need root on Android.
@@ -151,7 +142,10 @@ You can do this on Linux by editing the DeviceID in `/etc/bluetooth/main.conf`. 
 
 ## Multi-device Connectivity
 
-Upto two devices can be simultaneously connected to AirPods, for audio and control both. Seamless connection switching. The same notification shows up on Apple device when Android takes over the AirPods as if it were an Apple device ("Move to iPhone"). Android also shows a popup when the other device takes over.
+Up to two devices can be simultaneously connected to AirPods for both audio and
+control. The Apple device may show its normal system handoff notification when Android
+becomes the active source. This fork does not add a corresponding takeover popup on
+Android.
 
 ## Accessibility Settings and Hearing Aid
 

@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <elf.h>
 #include <atomic>
 #include <jni.h>
@@ -44,6 +45,49 @@ static uint8_t (*original_l2c_fcr_chk_chan_modes)(void *) = nullptr;
 static tBTA_STATUS (*original_BTA_DmSetLocalDiRecord)(tSDP_DI_RECORD *, uint32_t *) = nullptr;
 
 static std::atomic<bool> enableSdpHook(false);
+
+static int32_t (*original_A2dpStreamCallbacks_StartStream)(const void *, bool) = nullptr;
+
+static std::atomic<int64_t> a2dpStartGuardExpiryNs(0);
+static std::atomic<bool> a2dpStartHookInstalled(false);
+
+static constexpr char A2DP_START_STREAM_SYMBOL[] =
+        "_ZNK19A2dpStreamCallbacks11StartStreamEb";
+static constexpr int32_t A2DP_CTRL_ACK_FAILURE = 3;
+static constexpr int64_t MAX_A2DP_START_GUARD_LEASE_MS = 10'000;
+static constexpr int64_t NANOS_PER_MILLISECOND = 1'000'000;
+static constexpr int64_t NANOS_PER_SECOND = 1'000'000'000;
+
+static int64_t monotonicTimeNs() {
+    struct timespec now{};
+    if (clock_gettime(CLOCK_BOOTTIME, &now) != 0) {
+        return 0;
+    }
+    return static_cast<int64_t>(now.tv_sec) * NANOS_PER_SECOND + now.tv_nsec;
+}
+
+static bool isA2dpStartGuardLeaseActive() {
+    const int64_t expiryNs = a2dpStartGuardExpiryNs.load(std::memory_order_relaxed);
+    if (expiryNs <= 0) {
+        return false;
+    }
+
+    const int64_t nowNs = monotonicTimeNs();
+    return nowNs > 0 && nowNs < expiryNs;
+}
+
+int32_t fake_A2dpStreamCallbacks_StartStream(const void *self, bool lowLatency) {
+    if (isA2dpStartGuardLeaseActive()) {
+        LOGI("A2DP StartStream blocked by active guard lease");
+        return A2DP_CTRL_ACK_FAILURE;
+    }
+
+    if (!original_A2dpStreamCallbacks_StartStream) {
+        LOGE("A2DP StartStream original function unavailable");
+        return A2DP_CTRL_ACK_FAILURE;
+    }
+    return original_A2dpStreamCallbacks_StartStream(self, lowLatency);
+}
 
 static bool isBluetoothProcess() {
     int fd = open("/proc/self/cmdline", O_RDONLY);
@@ -327,6 +371,102 @@ static uint64_t findSymbolOffset(const std::vector<uint8_t> &elf, const char *sy
     return 0;
 }
 
+struct ExactSymbolLookupResult {
+    uint64_t offset = 0;
+    size_t matches = 0;
+    bool parsed = false;
+};
+
+static bool elfRangeIsValid(const std::vector<uint8_t> &elf, uint64_t offset, uint64_t size) {
+    return offset <= elf.size() && size <= elf.size() - offset;
+}
+
+static ExactSymbolLookupResult findUniqueExactSymbolOffset(
+        const std::vector<uint8_t> &elf,
+        const char *symbolName,
+        const char *symbolSectionName,
+        const char *stringSectionName) {
+    ExactSymbolLookupResult result;
+    if (elf.size() < sizeof(Elf64_Ehdr)) {
+        return result;
+    }
+
+    const auto *header = reinterpret_cast<const Elf64_Ehdr *>(elf.data());
+    if (memcmp(header->e_ident, ELFMAG, SELFMAG) != 0 ||
+        header->e_ident[EI_CLASS] != ELFCLASS64 ||
+        header->e_shentsize != sizeof(Elf64_Shdr) ||
+        header->e_shnum == 0 ||
+        header->e_shstrndx >= header->e_shnum ||
+        !elfRangeIsValid(elf, header->e_shoff,
+                         static_cast<uint64_t>(header->e_shnum) * sizeof(Elf64_Shdr))) {
+        return result;
+    }
+
+    const auto *sections = reinterpret_cast<const Elf64_Shdr *>(
+            elf.data() + header->e_shoff);
+    const Elf64_Shdr &sectionNamesSection = sections[header->e_shstrndx];
+    if (!elfRangeIsValid(elf, sectionNamesSection.sh_offset, sectionNamesSection.sh_size)) {
+        return result;
+    }
+    const char *sectionNames = reinterpret_cast<const char *>(
+            elf.data() + sectionNamesSection.sh_offset);
+
+    const Elf64_Shdr *symbolSection = nullptr;
+    const Elf64_Shdr *stringSection = nullptr;
+    for (size_t i = 0; i < header->e_shnum; ++i) {
+        if (sections[i].sh_name >= sectionNamesSection.sh_size) {
+            return result;
+        }
+        const char *sectionName = sectionNames + sections[i].sh_name;
+        const size_t maximumNameLength = sectionNamesSection.sh_size - sections[i].sh_name;
+        if (!memchr(sectionName, '\0', maximumNameLength)) {
+            return result;
+        }
+
+        if (strcmp(sectionName, symbolSectionName) == 0) {
+            symbolSection = &sections[i];
+        } else if (strcmp(sectionName, stringSectionName) == 0) {
+            stringSection = &sections[i];
+        }
+    }
+
+    if (!symbolSection || !stringSection ||
+        symbolSection->sh_entsize != sizeof(Elf64_Sym) ||
+        symbolSection->sh_size % sizeof(Elf64_Sym) != 0 ||
+        !elfRangeIsValid(elf, symbolSection->sh_offset, symbolSection->sh_size) ||
+        !elfRangeIsValid(elf, stringSection->sh_offset, stringSection->sh_size)) {
+        return result;
+    }
+
+    const auto *symbols = reinterpret_cast<const Elf64_Sym *>(
+            elf.data() + symbolSection->sh_offset);
+    const char *strings = reinterpret_cast<const char *>(elf.data() + stringSection->sh_offset);
+    const size_t symbolCount = symbolSection->sh_size / sizeof(Elf64_Sym);
+    result.parsed = true;
+
+    for (size_t i = 0; i < symbolCount; ++i) {
+        if (symbols[i].st_name >= stringSection->sh_size) {
+            continue;
+        }
+        const char *name = strings + symbols[i].st_name;
+        const size_t maximumNameLength = stringSection->sh_size - symbols[i].st_name;
+        if (!memchr(name, '\0', maximumNameLength)) {
+            continue;
+        }
+        if (strcmp(name, symbolName) == 0 &&
+            ELF64_ST_TYPE(symbols[i].st_info) == STT_FUNC &&
+            symbols[i].st_shndx != SHN_UNDEF) {
+            ++result.matches;
+            result.offset = symbols[i].st_value;
+        }
+    }
+
+    if (result.matches != 1) {
+        result.offset = 0;
+    }
+    return result;
+}
+
 static bool hookLibrary(const char *libname) {
     LOGI("hookLibrary called with libname: %s", libname);
 
@@ -369,6 +509,10 @@ static bool hookLibrary(const char *libname) {
 
     uint64_t chk_offset = 0;
     uint64_t sdp_offset = 0;
+    uint64_t a2dp_start_offset = 0;
+    bool rejectA2dpStartSymbol = false;
+    const bool resolveA2dpStart = strcmp(libname, "libbluetooth_jni.so") == 0 &&
+            !a2dpStartHookInstalled.load(std::memory_order_relaxed);
 
     for (int i = 0; i < eh->e_shnum; ++i) {
         if (!strcmp(shstr + shdr[i].sh_name, ".gnu_debugdata")) {
@@ -384,6 +528,26 @@ static bool hookLibrary(const char *libname) {
                 chk_offset = findSymbolOffset(decompressed, "l2c_fcr_chk_chan_modes");
 
                 sdp_offset = findSymbolOffset(decompressed, "BTA_DmSetLocalDiRecord");
+
+                if (resolveA2dpStart) {
+                    const ExactSymbolLookupResult lookup = findUniqueExactSymbolOffset(
+                            decompressed,
+                            A2DP_START_STREAM_SYMBOL,
+                            ".symtab",
+                            ".strtab");
+                    if (lookup.matches == 1 && lookup.offset != 0) {
+                        a2dp_start_offset = lookup.offset;
+                        LOGI("hookLibrary: exact A2DP StartStream symbol @ 0x%lx",
+                             (unsigned long) a2dp_start_offset);
+                    } else if (lookup.matches > 1 ||
+                               (lookup.matches == 1 && lookup.offset == 0)) {
+                        rejectA2dpStartSymbol = true;
+                        LOGE("hookLibrary: rejecting ambiguous/invalid A2DP StartStream symbol (%zu matches)",
+                             lookup.matches);
+                    } else if (!lookup.parsed) {
+                        LOGE("hookLibrary: could not parse debug symbol table for A2DP StartStream");
+                    }
+                }
             } else {
                 LOGE("debugdata decompress failed");
             }
@@ -400,6 +564,23 @@ static bool hookLibrary(const char *libname) {
     if (!sdp_offset) {
         LOGI("fallback dynsym sdp");
         sdp_offset = findSymbolOffsetDynsym(file, "BTA_DmSetLocalDiRecord");
+    }
+
+    if (resolveA2dpStart && !a2dp_start_offset && !rejectA2dpStartSymbol) {
+        const ExactSymbolLookupResult lookup = findUniqueExactSymbolOffset(
+                file,
+                A2DP_START_STREAM_SYMBOL,
+                ".dynsym",
+                ".dynstr");
+        if (lookup.matches == 1 && lookup.offset != 0) {
+            a2dp_start_offset = lookup.offset;
+            LOGI("hookLibrary: exact dynsym A2DP StartStream symbol @ 0x%lx",
+                 (unsigned long) a2dp_start_offset);
+        } else {
+            rejectA2dpStartSymbol = true;
+            LOGE("hookLibrary: exact A2DP StartStream symbol unavailable (%zu dynsym matches); guard stays fail-open",
+                 lookup.matches);
+        }
     }
 
     uintptr_t base = getModuleBase(libname);
@@ -422,7 +603,26 @@ static bool hookLibrary(const char *libname) {
         LOGI("hooked sdp");
     }
 
-    return chk_offset || sdp_offset;
+    bool a2dpStartHooked = false;
+    if (a2dp_start_offset && !rejectA2dpStartSymbol &&
+        !a2dpStartHookInstalled.load(std::memory_order_relaxed)) {
+        void *target = reinterpret_cast<void *>(base + a2dp_start_offset);
+        const int hookStatus = hook_func(
+                target,
+                (void *) fake_A2dpStreamCallbacks_StartStream,
+                (void **) &original_A2dpStreamCallbacks_StartStream);
+        if (hookStatus == 0 && original_A2dpStreamCallbacks_StartStream) {
+            a2dpStartHookInstalled.store(true, std::memory_order_relaxed);
+            a2dpStartHooked = true;
+            LOGI("hooked exact A2DP StartStream");
+        } else {
+            a2dpStartGuardExpiryNs.store(0, std::memory_order_relaxed);
+            LOGE("failed to hook A2DP StartStream (status=%d, original=%p); guard stays fail-open",
+                 hookStatus, original_A2dpStreamCallbacks_StartStream);
+        }
+    }
+
+    return chk_offset || sdp_offset || a2dpStartHooked;
 }
 
 static void on_library_loaded(const char *name, void *) {
@@ -459,4 +659,35 @@ Java_me_kavishdevar_librepods_utils_NativeBridge_setSdpHook(JNIEnv *, jobject th
     enableSdpHook.store(enable, std::memory_order_relaxed);
 
     LOGI("sdp hook enabled: %d", enable);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_me_kavishdevar_librepods_utils_NativeBridge_setA2dpStartGuardLease(
+        JNIEnv *, jobject, jlong remainingMs) {
+    if (remainingMs <= 0) {
+        const int64_t previousExpiryNs = a2dpStartGuardExpiryNs.exchange(
+                0, std::memory_order_relaxed);
+        if (previousExpiryNs > 0) {
+            LOGI("A2DP StartStream guard lease cleared");
+        }
+        return;
+    }
+
+    const int64_t clampedRemainingMs = remainingMs > MAX_A2DP_START_GUARD_LEASE_MS
+            ? MAX_A2DP_START_GUARD_LEASE_MS
+            : remainingMs;
+    const int64_t nowNs = monotonicTimeNs();
+    if (nowNs <= 0) {
+        a2dpStartGuardExpiryNs.store(0, std::memory_order_relaxed);
+        LOGE("A2DP StartStream guard clock unavailable; lease cleared");
+        return;
+    }
+
+    const int64_t expiryNs = nowNs + clampedRemainingMs * NANOS_PER_MILLISECOND;
+    const int64_t previousExpiryNs = a2dpStartGuardExpiryNs.exchange(
+            expiryNs, std::memory_order_relaxed);
+    if (previousExpiryNs <= nowNs) {
+        LOGI("A2DP StartStream guard lease activated for %lldms",
+             (long long) clampedRemainingMs);
+    }
 }

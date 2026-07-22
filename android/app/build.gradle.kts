@@ -1,7 +1,7 @@
 import java.util.Properties
 import java.util.zip.ZipFile
 
-val appVersionName = "1.0.2-hyperos.1"
+val appVersionName = "1.0.2-remote-guard.1"
 
 plugins {
     alias(libs.plugins.android.application)
@@ -50,7 +50,7 @@ android {
     defaultConfig {
         applicationId = "me.kavishdevar.librepods"
         targetSdk = 37
-        versionCode = 76
+        versionCode = 77
         versionName = appVersionName
     }
     buildTypes {

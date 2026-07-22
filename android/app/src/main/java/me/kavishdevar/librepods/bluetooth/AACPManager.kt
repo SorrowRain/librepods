@@ -23,76 +23,37 @@ package me.kavishdevar.librepods.bluetooth
 import android.util.Log
 import me.kavishdevar.librepods.data.Capability
 import me.kavishdevar.librepods.data.CustomEq
-import me.kavishdevar.librepods.data.LocalHostIdentity
-import me.kavishdevar.librepods.data.SmartRoutingTargetResolver
-import me.kavishdevar.librepods.data.TakeoverAudioSource
-import me.kavishdevar.librepods.diagnostics.AacpOperation
-import me.kavishdevar.librepods.diagnostics.AacpSendOutcome
-import me.kavishdevar.librepods.diagnostics.RoutingCorrelation
-import me.kavishdevar.librepods.diagnostics.RoutingEventDetail
-import me.kavishdevar.librepods.diagnostics.RoutingSeverity
-import me.kavishdevar.librepods.diagnostics.RoutingTrace
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.io.encoding.ExperimentalEncodingApi
 
-enum class TakeoverPacketSequenceMode {
-    FULL,
-    MEDIA_AND_HIJACK,
-}
-
-enum class TakeoverPacketSourcePolicy {
-    INITIAL_NON_LOCAL,
-    RETRY_KNOWN_NON_LOCAL,
-}
-
-enum class TakeoverPacketStage {
-    OWNERSHIP,
-    MEDIA_INFORMATION,
-    HIJACK_REQUEST,
-}
-
-enum class TakeoverPacketSequenceFailure {
-    SOURCE_REJECTED,
-    PERMIT_REVOKED,
-    SOCKET_STALE,
-    INVALID_TARGET,
-    WRITE_FAILED,
-}
-
-data class TakeoverPacketSequenceResult(
-    val mode: TakeoverPacketSequenceMode,
-    val ownershipSent: Boolean? = null,
-    val mediaInformationSent: Boolean = false,
-    val hijackSent: Boolean = false,
-    val failedStage: TakeoverPacketStage? = null,
-    val failure: TakeoverPacketSequenceFailure? = null,
-) {
-    val completed: Boolean
-        get() = failure == null &&
-            (mode == TakeoverPacketSequenceMode.MEDIA_AND_HIJACK || ownershipSent == true) &&
-            mediaInformationSent &&
-            hijackSent
-}
-
-object TakeoverPacketSequencePlan {
-    fun stages(mode: TakeoverPacketSequenceMode): List<TakeoverPacketStage> = when (mode) {
-        TakeoverPacketSequenceMode.FULL -> listOf(
-            TakeoverPacketStage.OWNERSHIP,
-            TakeoverPacketStage.MEDIA_INFORMATION,
-            TakeoverPacketStage.HIJACK_REQUEST,
-        )
-        TakeoverPacketSequenceMode.MEDIA_AND_HIJACK -> listOf(
-            TakeoverPacketStage.MEDIA_INFORMATION,
-            TakeoverPacketStage.HIJACK_REQUEST,
+internal object AacpSessionCleanupGate {
+    fun canClear(
+        boundSocket: Any?,
+        boundGeneration: Long?,
+        expectedSocket: Any?,
+        expectedGeneration: Long?,
+    ): Boolean {
+        if (expectedSocket == null || expectedGeneration == null) {
+            return boundSocket == null && boundGeneration == null
+        }
+        return boundGeneration != null && AacpSocketLeaseGate.isCurrent(
+            currentSocket = boundSocket,
+            currentGeneration = boundGeneration,
+            leaseSocket = expectedSocket,
+            leaseGeneration = expectedGeneration,
         )
     }
-}
 
-internal class AacpPacketWriteCoordinator {
-    private val lock = Any()
-
-    fun <T> runExclusive(block: () -> T): T = synchronized(lock, block)
+    fun canClear(
+        boundLease: AacpSocketLease?,
+        expectedLease: AacpSocketLease?,
+    ): Boolean = canClear(
+        boundSocket = boundLease?.socket,
+        boundGeneration = boundLease?.generation,
+        expectedSocket = expectedLease?.socket,
+        expectedGeneration = expectedLease?.generation,
+    )
 }
 
 /**
@@ -102,7 +63,6 @@ internal class AacpPacketWriteCoordinator {
  */
 class AACPManager {
     private val TAG = "AACPManager[${System.identityHashCode(this)}]"
-    private val packetWriteCoordinator = AacpPacketWriteCoordinator()
     companion object {
         @Suppress("unused")
         object Opcodes {
@@ -120,6 +80,7 @@ class AACPManager {
             const val STEM_PRESS: Byte = 0x19
             const val HEADPHONE_ACCOMMODATION: Byte = 0x53
             const val CONNECTED_DEVICES: Byte = 0x2E // TiPi 1
+            const val AUDIO_SOURCE_REQUEST: Byte = 0x0D
             const val AUDIO_SOURCE: Byte = 0x0E // TiPi 2
             const val SMART_ROUTING: Byte = 0x10
             const val TIPI_3: Byte = 0x0C // Don't know this one
@@ -215,10 +176,11 @@ class AACPManager {
         }
 
         enum class AudioSourceType(val value: Byte) {
-            NONE(0x00), CALL(0x01), MEDIA(0x02);
+            NONE(0x00), CALL(0x01), MEDIA(0x02), UNKNOWN(0xFF.toByte());
 
             companion object {
-                fun fromByte(byte: Byte): AudioSourceType? = entries.find { it.value == byte }
+                fun fromByte(byte: Byte): AudioSourceType =
+                    entries.find { it != UNKNOWN && it.value == byte } ?: UNKNOWN
             }
         }
 
@@ -250,12 +212,7 @@ class AACPManager {
     var controlCommandListeners: MutableMap<ControlCommandIdentifiers, MutableList<ControlCommandListener>> =
         mutableMapOf()
 
-    @Volatile
     var owns: Boolean = false
-        private set
-
-    @Volatile
-    var requestedOwnership: Boolean? = null
         private set
 
     var oldConnectedDevices: List<ConnectedDevice> = listOf()
@@ -264,10 +221,6 @@ class AACPManager {
     var connectedDevices: List<ConnectedDevice> = listOf()
         private set
 
-    @Volatile
-    private var rememberedConnectedDevices: List<ConnectedDevice> = listOf()
-
-    @Volatile
     var audioSource: AudioSource? = null
         private set
 
@@ -285,6 +238,14 @@ class AACPManager {
 
     var customEqCallback: ((CustomEq) -> Unit)? = null
 
+    @Volatile
+    private var socketLease: AacpSocketLease? = null
+
+    @Synchronized
+    fun bindSocketLease(lease: AacpSocketLease?) {
+        socketLease = lease?.takeIf(BluetoothConnectionManager::isCurrent)
+    }
+
     @Synchronized
     fun getControlCommandStatus(identifier: ControlCommandIdentifiers): ControlCommandStatus? {
         return controlCommandStatusList.find { it.identifier == identifier }
@@ -294,15 +255,15 @@ class AACPManager {
     private fun setControlCommandStatusValue(
         identifier: ControlCommandIdentifiers, value: ByteArray
     ) {
+        val storedValue = value.copyOf()
         controlCommandStatusList.removeAll { it.identifier == identifier }
-        controlCommandStatusList.add(ControlCommandStatus(identifier, value.copyOf()))
+        controlCommandStatusList.add(ControlCommandStatus(identifier, storedValue))
+        controlCommandListeners[identifier]?.forEach { listener ->
+            listener.onControlCommandReceived(ControlCommand(identifier.value, storedValue))
+        }
 
         if (identifier == ControlCommandIdentifiers.OWNS_CONNECTION) {
-            owns = value.isNotEmpty() && value[0] == 0x01.toByte()
-            requestedOwnership = null
-        }
-        controlCommandListeners[identifier]?.forEach { listener ->
-            listener.onControlCommandReceived(ControlCommand(identifier.value, value.copyOf()))
+            owns = storedValue.isNotEmpty() && storedValue[0] == 0x01.toByte()
         }
     }
 
@@ -315,12 +276,26 @@ class AACPManager {
         fun onHeadTrackingReceived(headTracking: ByteArray)
         fun onUnknownPacketReceived(packet: ByteArray)
         fun onProximityKeysReceived(proximityKeys: ByteArray)
-        fun onStemPressReceived(stemPress: ByteArray)
-        fun onAudioSourceReceived(audioSource: ByteArray)
-        fun onOwnershipChangeReceived(owns: Boolean)
-        fun onConnectedDevicesReceived(connectedDevices: List<ConnectedDevice>)
-        fun onOwnershipToFalseRequest(sender: String, reasonReverseTapped: Boolean)
-        fun onRemoteStreamingStateChanged(sender: String, isStreaming: Boolean)
+        fun onStemPressReceived(stemPress: ByteArray, expectedLease: AacpSocketLease)
+        fun onAudioSourceReceived(
+            audioSource: AudioSource?,
+            expectedLease: AacpSocketLease,
+        )
+        fun onOwnershipChangeReceived(owns: Boolean, expectedLease: AacpSocketLease)
+        fun onConnectedDevicesReceived(
+            connectedDevices: List<ConnectedDevice>,
+            expectedLease: AacpSocketLease,
+        )
+        fun onOwnershipToFalseRequest(
+            sender: String,
+            reasonReverseTapped: Boolean,
+            expectedLease: AacpSocketLease,
+        )
+        fun onRemoteStreamingStateChanged(
+            sender: String,
+            isStreaming: Boolean,
+            expectedLease: AacpSocketLease,
+        )
         fun onShowNearbyUI(sender: String)
         fun onHeadphoneAccommodationReceived(eqData: FloatArray)
         fun onCustomEqReceived(customEq: CustomEq)
@@ -328,6 +303,7 @@ class AACPManager {
     }
 
     fun parseStemPressResponse(data: ByteArray): Pair<StemPressType, StemPressBudType> {
+        Log.d(TAG, "Parsing Stem Press Response: ${data.joinToString(" ") { "%02X".format(it) }}")
         if (data.size != 8) {
             throw IllegalArgumentException("Data array too short to parse Stem Press Response")
         }
@@ -380,226 +356,68 @@ class AACPManager {
         return payload
     }
 
-    fun sendDataPacket(data: ByteArray): Boolean {
-        return packetWriteCoordinator.runExclusive {
-            sendPacketLocked(createDataPacket(data), expectedLease = null)
-        }
+    fun sendDataPacket(
+        data: ByteArray,
+        expectedLease: AacpSocketLease? = socketLease,
+    ): Boolean {
+        if (data.isEmpty()) return false
+        return sendPacket(createDataPacket(data), expectedLease)
+    }
+
+    fun requestAudioSource(expectedLease: AacpSocketLease? = socketLease): Boolean {
+        return sendDataPacket(
+            byteArrayOf(Opcodes.AUDIO_SOURCE_REQUEST, 0x00),
+            expectedLease,
+        )
     }
 
     fun sendControlCommand(
         identifier: Byte,
         value: ByteArray,
-        correlation: RoutingCorrelation = RoutingCorrelation(),
-        reason: String? = null,
-    ): Boolean = packetWriteCoordinator.runExclusive {
-        sendControlCommandLocked(identifier, value, correlation, reason, expectedLease = null)
-    }
-
-    private fun sendControlCommandLocked(
-        identifier: Byte,
-        value: ByteArray,
-        correlation: RoutingCorrelation,
-        reason: String?,
-        expectedLease: AacpSocketLease?,
+        expectedLease: AacpSocketLease? = socketLease,
     ): Boolean {
         val controlPacket = createControlCommandPacket(identifier, value)
-        val commandIdentifier = ControlCommandIdentifiers.fromByte(identifier) ?: return false
-        if (commandIdentifier == ControlCommandIdentifiers.OWNS_CONNECTION) {
-            requestedOwnership = value.firstOrNull() == 0x01.toByte()
-        }
-        val sent = sendPacketLocked(createDataPacket(controlPacket), expectedLease)
-        if (commandIdentifier == ControlCommandIdentifiers.OWNS_CONNECTION && !sent) {
-            requestedOwnership = null
-        }
-        val socketConnected = expectedLease?.let {
-            BluetoothConnectionManager.isCurrent(it) && it.socket.isConnected
-        } ?: (BluetoothConnectionManager.aacpSocket?.isConnected == true)
-        RoutingTrace.record(
-            if (sent) RoutingSeverity.INFO else RoutingSeverity.WARNING,
-            correlation
-        ) {
-            RoutingEventDetail.AacpSend(
-                operation = if (commandIdentifier == ControlCommandIdentifiers.OWNS_CONNECTION) {
-                    AacpOperation.OWNERSHIP
-                } else {
-                    AacpOperation.OTHER_ROUTING
-                },
-                outcome = when {
-                    sent -> AacpSendOutcome.SENT
-                    !socketConnected ->
-                        AacpSendOutcome.SOCKET_UNAVAILABLE
-                    else -> AacpSendOutcome.WRITE_FAILED
-                },
-                socketConnected = socketConnected,
-                requestedValue = if (commandIdentifier == ControlCommandIdentifiers.OWNS_CONNECTION) {
-                    value.firstOrNull()?.toInt()
-                } else {
-                    null
-                },
-                reason = reason ?: "send_control_${commandIdentifier.name.lowercase()}"
-            )
-        }
-        return sent
-    }
-
-    fun sendTakeoverPacketSequence(
-        selfMacAddress: String,
-        targetMacAddresses: List<String>,
-        lease: AacpSocketLease,
-        mode: TakeoverPacketSequenceMode,
-        sourcePolicy: TakeoverPacketSourcePolicy,
-        correlation: RoutingCorrelation,
-        reason: String,
-        packetPermit: (() -> Boolean)? = null,
-    ): TakeoverPacketSequenceResult = packetWriteCoordinator.runExclusive {
-        val targets = targetMacAddresses.distinct()
-        val validMac = Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
-        if (!validMac.matches(selfMacAddress) ||
-            targets.isEmpty() ||
-            targets.any { !validMac.matches(it) }
-        ) {
-            return@runExclusive TakeoverPacketSequenceResult(
-                mode = mode,
-                failure = TakeoverPacketSequenceFailure.INVALID_TARGET,
-            )
-        }
-
-        fun sourceAllowed(): Boolean {
-            val source = audioSource
-            val classified = when {
-                source == null -> TakeoverAudioSource.UNKNOWN
-                source.type == AudioSourceType.NONE -> TakeoverAudioSource.NONE
-                else -> LocalHostIdentity.classifyKnownSource(selfMacAddress, source.mac)
-            }
-            return when (sourcePolicy) {
-                TakeoverPacketSourcePolicy.INITIAL_NON_LOCAL ->
-                    classified != TakeoverAudioSource.LOCAL
-                TakeoverPacketSourcePolicy.RETRY_KNOWN_NON_LOCAL ->
-                    classified == TakeoverAudioSource.NONE ||
-                        classified == TakeoverAudioSource.REMOTE
-            }
-        }
-
-        fun rejected(stage: TakeoverPacketStage): TakeoverPacketSequenceResult? = when {
-            !BluetoothConnectionManager.isCurrent(lease) -> TakeoverPacketSequenceResult(
-                mode = mode,
-                failedStage = stage,
-                failure = TakeoverPacketSequenceFailure.SOCKET_STALE,
-            )
-            packetPermit?.invoke() == false -> TakeoverPacketSequenceResult(
-                mode = mode,
-                failedStage = stage,
-                failure = TakeoverPacketSequenceFailure.PERMIT_REVOKED,
-            )
-            !sourceAllowed() -> TakeoverPacketSequenceResult(
-                mode = mode,
-                failedStage = stage,
-                failure = TakeoverPacketSequenceFailure.SOURCE_REJECTED,
-            )
-            else -> null
-        }
-
-        var ownershipSent: Boolean? = null
-        if (mode == TakeoverPacketSequenceMode.FULL) {
-            rejected(TakeoverPacketStage.OWNERSHIP)?.let { return@runExclusive it }
-            ownershipSent = sendControlCommandLocked(
-                identifier = ControlCommandIdentifiers.OWNS_CONNECTION.value,
-                value = byteArrayOf(0x01),
-                correlation = correlation,
-                reason = reason,
-                expectedLease = lease,
-            )
-            if (!ownershipSent) {
-                return@runExclusive TakeoverPacketSequenceResult(
-                    mode = mode,
-                    ownershipSent = false,
-                    failedStage = TakeoverPacketStage.OWNERSHIP,
-                    failure = if (BluetoothConnectionManager.isCurrent(lease)) {
-                        TakeoverPacketSequenceFailure.WRITE_FAILED
-                    } else {
-                        TakeoverPacketSequenceFailure.SOCKET_STALE
-                    },
-                )
-            }
-        }
-
-        rejected(TakeoverPacketStage.MEDIA_INFORMATION)?.let {
-            return@runExclusive it.copy(ownershipSent = ownershipSent)
-        }
-        val mediaInformationSent = sendPacketLocked(
-            createDataPacket(
-                createMediaInformationPacket(
-                    selfMacAddress = selfMacAddress,
-                    targetMacAddress = targets.first(),
-                    streamingState = true,
-                )
-            ),
-            expectedLease = lease,
-        )
-        if (!mediaInformationSent) {
-            return@runExclusive TakeoverPacketSequenceResult(
-                mode = mode,
-                ownershipSent = ownershipSent,
-                failedStage = TakeoverPacketStage.MEDIA_INFORMATION,
-                failure = if (BluetoothConnectionManager.isCurrent(lease)) {
-                    TakeoverPacketSequenceFailure.WRITE_FAILED
-                } else {
-                    TakeoverPacketSequenceFailure.SOCKET_STALE
-                },
-            )
-        }
-
-        for (target in targets) {
-            rejected(TakeoverPacketStage.HIJACK_REQUEST)?.let {
-                return@runExclusive it.copy(
-                    ownershipSent = ownershipSent,
-                    mediaInformationSent = true,
-                )
-            }
-            if (!sendPacketLocked(
-                    createDataPacket(createHijackRequestPacket(target)),
-                    expectedLease = lease,
-                )
-            ) {
-                return@runExclusive TakeoverPacketSequenceResult(
-                    mode = mode,
-                    ownershipSent = ownershipSent,
-                    mediaInformationSent = true,
-                    failedStage = TakeoverPacketStage.HIJACK_REQUEST,
-                    failure = if (BluetoothConnectionManager.isCurrent(lease)) {
-                        TakeoverPacketSequenceFailure.WRITE_FAILED
-                    } else {
-                        TakeoverPacketSequenceFailure.SOCKET_STALE
-                    },
-                )
-            }
-        }
-
-        TakeoverPacketSequenceResult(
-            mode = mode,
-            ownershipSent = ownershipSent,
-            mediaInformationSent = true,
-            hijackSent = true,
-        )
+        if (ControlCommandIdentifiers.fromByte(identifier) == null) return false
+        return sendDataPacket(controlPacket, expectedLease)
     }
 
     @OptIn(ExperimentalStdlibApi::class)
-    fun sendControlCommand(identifier: Byte, value: Byte): Boolean {
-        return sendControlCommand(identifier, byteArrayOf(value))
+    fun sendControlCommand(
+        identifier: Byte,
+        value: Byte,
+        expectedLease: AacpSocketLease? = socketLease,
+    ): Boolean {
+        val controlPacket = createControlCommandPacket(identifier, byteArrayOf(value))
+        if (ControlCommandIdentifiers.fromByte(identifier) == null) return false
+        return sendDataPacket(controlPacket, expectedLease)
     }
 
-    fun sendControlCommand(identifier: Byte, value: Boolean): Boolean {
-        return sendControlCommand(
-            identifier,
-            if (value) byteArrayOf(0x01) else byteArrayOf(0x02)
+    fun sendControlCommand(
+        identifier: Byte,
+        value: Boolean,
+        expectedLease: AacpSocketLease? = socketLease,
+    ): Boolean {
+        val controlPacket = createControlCommandPacket(
+            identifier, if (value) byteArrayOf(0x01) else byteArrayOf(0x02)
         )
+        if (ControlCommandIdentifiers.fromByte(identifier) == null) return false
+        return sendDataPacket(controlPacket, expectedLease)
     }
 
-    fun sendControlCommand(identifier: Byte, value: Int): Boolean {
-        return sendControlCommand(identifier, byteArrayOf(value.toByte()))
+    fun sendControlCommand(
+        identifier: Byte,
+        value: Int,
+        expectedLease: AacpSocketLease? = socketLease,
+    ): Boolean {
+        val controlPacket = createControlCommandPacket(identifier, byteArrayOf(value.toByte()))
+        if (ControlCommandIdentifiers.fromByte(identifier) == null) return false
+        return sendDataPacket(controlPacket, expectedLease)
     }
 
     fun parseProximityKeysResponse(data: ByteArray): Map<ProximityKeyType, ByteArray> {
+        Log.d(
+            TAG, "Parsing Proximity Keys Response: ${data.joinToString(" ") { "%02X".format(it) }}"
+        )
         if (data.size < 7) {
             throw IllegalArgumentException("Data array too short to parse Proximity Keys Response")
         }
@@ -626,17 +444,25 @@ class AACPManager {
             try {
                 keys[ProximityKeyType.fromByte(keyType)] = key
             } catch (e: Exception) {
-                Log.e(TAG, "Incorrect proximity key type received: $keyType")
+                Log.e(
+                    TAG, "incorrect key type received: $keyType, ${key.toHexString()}"
+                )
             }
             offset += keyLength
-            Log.d(TAG, "Parsed proximity key type=$keyType length=$keyLength")
+            Log.d(
+                TAG, "Parsed Proximity Key: Type: ${keyType}, Length: $keyLength, Key: ${
+                key.joinToString(" ") { "%02X".format(it) }
+            }")
         }
         return keys
     }
 
-    fun sendRequestProximityKeys(type: Byte): Boolean {
+    fun sendRequestProximityKeys(
+        type: Byte,
+        expectedLease: AacpSocketLease? = socketLease,
+    ): Boolean {
         Log.d(TAG, "Requesting proximity keys of type: ${type.toString(16)}")
-        return sendDataPacket(createRequestProximityKeysPacket(type))
+        return sendDataPacket(createRequestProximityKeysPacket(type), expectedLease)
     }
 
     fun createRequestProximityKeysPacket(type: Byte): ByteArray {
@@ -646,13 +472,27 @@ class AACPManager {
     }
 
     @OptIn(ExperimentalStdlibApi::class)
-    fun receivePacket(packet: ByteArray) {
-        if (packet.size < 6) {
-            Log.w(TAG, "Received packet too short: ${packet.size} bytes")
+    fun receivePacket(
+        packet: ByteArray,
+        expectedLease: AacpSocketLease,
+    ) {
+        if (!BluetoothConnectionManager.isCurrent(expectedLease)) {
+            Log.d(TAG, "Ignoring packet from a stale AACP socket")
             return
         }
-        if (!packet.copyOfRange(0, HEADER_BYTES.size).contentEquals(HEADER_BYTES)) {
-            Log.w(TAG, "Received packet with an unexpected header (${packet.size} bytes)")
+        if (!packet.toHexString().startsWith("04000400")) {
+            Log.w(
+                TAG, "Received packet does not start with expected header: ${
+                packet.joinToString(" ") {
+                    "%02X".format(it)
+                }
+            }")
+            return
+        }
+        if (packet.size < 6) {
+            Log.w(
+                TAG, "Received packet too short: ${packet.joinToString(" ") { "%02X".format(it) }}"
+            )
             return
         }
 
@@ -669,29 +509,41 @@ class AACPManager {
                     callback?.onUnknownPacketReceived(packet)
                     return
                 }
-                setControlCommandStatusValue(
-                    ControlCommandIdentifiers.fromByte(controlCommand.identifier) ?: return,
-                    controlCommand.value
-                )
-                Log.d(
-                    TAG,
-                    "Control command received: " +
-                        "${ControlCommandIdentifiers.fromByte(controlCommand.identifier)?.name ?: "UNKNOWN"} " +
-                        "(${controlCommand.value.size} bytes)"
-                )
-
-                val controlCommandIdentifier = ControlCommandIdentifiers.fromByte(
-                    controlCommand.identifier
-                )
+                val controlCommandIdentifier =
+                    ControlCommandIdentifiers.fromByte(controlCommand.identifier)
                 if (controlCommandIdentifier == null) {
                     Log.w(
                         TAG,
                         "Unknown control command identifier: ${controlCommand.identifier.toHexString()}"
                     )
+                    callback?.onUnknownPacketReceived(packet)
+                    return
+                }
+                setControlCommandStatusValue(controlCommandIdentifier, controlCommand.value)
+                Log.d(
+                    TAG,
+                    "Control command received: ${controlCommand.identifier.toHexString()} - ${
+                        controlCommand.value.joinToString(" ") { "%02X".format(it) }
+                    }")
+
+                val controlCommandListText = try {
+                    controlCommandStatusList.joinToString(", ") { it ->
+                        "${it.identifier.name} (${it.identifier.value.toHexString()}) - ${
+                            it.value.joinToString(
+                                " "
+                            ) { "%02X".format(it) }
+                        }"
+                    }
+                } catch (e: Exception) {
+                    e.message
                 }
 
+                Log.d(
+                    TAG, "Control command list is now: $controlCommandListText"
+                )
+
                 if (controlCommandIdentifier == ControlCommandIdentifiers.OWNS_CONNECTION) {
-                    callback?.onOwnershipChangeReceived(owns)
+                    callback?.onOwnershipChangeReceived(owns, expectedLease)
                 }
 
                 callback?.onControlCommandReceived(packet)
@@ -707,7 +559,12 @@ class AACPManager {
 
             Opcodes.HEADTRACKING -> {
                 if (packet.size < 70) {
-                    Log.w(TAG, "Received HEADTRACKING packet too short: ${packet.size} bytes")
+                    Log.w(
+                        TAG, "Received HEADTRACKING packet too short: ${
+                        packet.joinToString(" ") {
+                            "%02X".format(it)
+                        }
+                    }")
                     return
                 }
                 callback?.onHeadTrackingReceived(packet)
@@ -718,7 +575,7 @@ class AACPManager {
             }
 
             Opcodes.STEM_PRESS -> {
-                callback?.onStemPressReceived(packet)
+                callback?.onStemPressReceived(packet, expectedLease)
             }
 
             Opcodes.AUDIO_SOURCE -> {
@@ -726,18 +583,16 @@ class AACPManager {
                     val (mac, type) = parseAudioSourceResponse(packet)
                     audioSource = AudioSource(mac, type)
                 } catch (e: Exception) {
+                    audioSource = null
                     Log.e(TAG, "Error parsing audio source response: ${e.message}")
                 }
-                callback?.onAudioSourceReceived(packet)
+                callback?.onAudioSourceReceived(audioSource, expectedLease)
             }
 
             Opcodes.CONNECTED_DEVICES -> {
                 oldConnectedDevices = connectedDevices
                 connectedDevices = parseConnectedDevicesResponse(packet)
-                if (connectedDevices.isNotEmpty()) {
-                    rememberedConnectedDevices = connectedDevices.map { it.copy() }
-                }
-                callback?.onConnectedDevicesReceived(connectedDevices)
+                callback?.onConnectedDevicesReceived(connectedDevices, expectedLease)
             }
 
             Opcodes.SMART_ROUTING_RESP -> {
@@ -767,18 +622,19 @@ class AACPManager {
                     TAG,
                     "Smart Routing Response from $sender: $packetString, type: ${connectedDevices.find { it.mac == sender }?.type}"
                 )
-                if (packetString.contains("hostStreamingState")) {
+                if (packetString.contains("hostStreamingState", ignoreCase = true)) {
                     when {
-                        packetString.contains("YES") ->
-                            callback?.onRemoteStreamingStateChanged(sender, true)
-                        packetString.contains("NO") ->
-                            callback?.onRemoteStreamingStateChanged(sender, false)
+                        packetString.contains("YES", ignoreCase = true) ->
+                            callback?.onRemoteStreamingStateChanged(sender, true, expectedLease)
+                        packetString.contains("NO", ignoreCase = true) ->
+                            callback?.onRemoteStreamingStateChanged(sender, false, expectedLease)
                     }
                 }
                 if (packetString.contains("SetOwnershipToFalse")) {
                     callback?.onOwnershipToFalseRequest(
                         sender,
-                        packetString.contains("ReverseBannerTapped")
+                        packetString.contains("ReverseBannerTapped"),
+                        expectedLease,
                     )
                 }
                 if (packetString.contains("ShowNearbyUI")) {
@@ -830,7 +686,7 @@ class AACPManager {
             }
 
             Opcodes.CUSTOM_EQ -> {
-                Log.d(TAG, "Parsing CUSTOM_EQ (${packet.size} bytes)")
+                Log.d(TAG, "Parsing CUSTOM_EQ: ${packet.toHexString()}")
                 customEq = parseCustomEqPacket(packet)
                 customEqCallback?.invoke(customEq)
                 callback?.onCustomEqReceived(customEq)
@@ -843,8 +699,8 @@ class AACPManager {
         }
     }
 
-    fun sendNotificationRequest(): Boolean {
-        return sendDataPacket(createRequestNotificationPacket())
+    fun sendNotificationRequest(expectedLease: AacpSocketLease? = socketLease): Boolean {
+        return sendDataPacket(createRequestNotificationPacket(), expectedLease)
     }
 
     fun createRequestNotificationPacket(): ByteArray {
@@ -855,8 +711,8 @@ class AACPManager {
         return opcode + data
     }
 
-    fun sendSetFeatureFlagsPacket(): Boolean {
-        return sendDataPacket(createSetFeatureFlagsPacket())
+    fun sendSetFeatureFlagsPacket(expectedLease: AacpSocketLease? = socketLease): Boolean {
+        return sendDataPacket(createSetFeatureFlagsPacket(), expectedLease)
     }
 
     fun createSetFeatureFlagsPacket(): ByteArray {
@@ -886,8 +742,8 @@ class AACPManager {
         )
     }
 
-    fun sendStartHeadTracking(): Boolean {
-        return sendDataPacket(createStartHeadTrackingPacket())
+    fun sendStartHeadTracking(expectedLease: AacpSocketLease? = socketLease): Boolean {
+        return sendDataPacket(createStartHeadTrackingPacket(), expectedLease)
     }
 
     fun createStartHeadTrackingPacket(): ByteArray {
@@ -947,8 +803,8 @@ class AACPManager {
         return opcode + data
     }
 
-    fun sendStopHeadTracking(): Boolean {
-        return sendDataPacket(createStopHeadTrackingPacket())
+    fun sendStopHeadTracking(expectedLease: AacpSocketLease? = socketLease): Boolean {
+        return sendDataPacket(createStopHeadTrackingPacket(), expectedLease)
     }
 
     fun createStopHeadTrackingPacket(): ByteArray {
@@ -1027,7 +883,11 @@ class AACPManager {
         return packet
     }
 
-    fun sendMediaInformationNewDevice(selfMacAddress: String, targetMacAddress: String): Boolean {
+    fun sendMediaInformationNewDevice(
+        selfMacAddress: String,
+        targetMacAddress: String,
+        expectedLease: AacpSocketLease? = socketLease,
+    ): Boolean {
         if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")) || targetMacAddress.length != 17 || !targetMacAddress.matches(
                 Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
             )
@@ -1045,7 +905,8 @@ class AACPManager {
             createMediaInformationNewDevicePacket(
                 selfMacAddress,
                 targetMacAddress
-            )
+            ),
+            expectedLease,
         )
     }
 
@@ -1083,204 +944,11 @@ class AACPManager {
         return opcode + buffer.array()
     }
 
-    fun resolveSmartRoutingTarget(selfMacAddress: String): String? =
-        resolveSmartRoutingTargets(selfMacAddress).firstOrNull()
-
-    fun resolveSmartRoutingTargets(selfMacAddress: String): List<String> =
-        SmartRoutingTargetResolver.resolveTargets(
-            selfAddress = selfMacAddress,
-            activeSourceAddress = audioSource
-                ?.takeUnless { it.type == AudioSourceType.NONE }
-                ?.mac,
-            currentDeviceAddresses = connectedDevices.map { it.mac },
-            rememberedDeviceAddresses = rememberedConnectedDevices.map { it.mac },
-        )
-
-    fun sendHijackRequest(selfMacAddress: String): Boolean {
-        if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
-            // throw IllegalArgumentException("MAC address must be 6 bytes")
-            Log.w(TAG, "Invalid MAC address format, got: selfMacAddress=$selfMacAddress")
-            return false
-        }
-        val targets = resolveSmartRoutingTargets(selfMacAddress)
-        if (targets.isEmpty()) {
-            Log.w(TAG, "Cannot send Hijack Request packet: No remote Smart Routing host known")
-            return false
-        }
-        var success = true
-        for (target in targets) {
-            Log.d(TAG, "Sending Hijack Request packet to $target")
-            success = sendDataPacket(createHijackRequestPacket(target)) && success
-        }
-        return success
-    }
-
-    fun createHijackRequestPacket(targetMacAddress: String): ByteArray {
-        val opcode = byteArrayOf(Opcodes.SMART_ROUTING, 0x00)
-        val buffer = ByteBuffer.allocate(106)
-        buffer.put(
-            targetMacAddress.split(":").map { it.toInt(16).toByte() }.toByteArray().reversedArray()
-        )
-        buffer.put(byteArrayOf(0x62, 0x00))
-        buffer.put(byteArrayOf(0x01, 0xE5.toByte()))
-        buffer.put(0x4A)
-        buffer.put("localscore".toByteArray())
-        buffer.put(byteArrayOf(0x30, 0x64))
-        buffer.put(0x46)
-        buffer.put("reason".toByteArray())
-        buffer.put(0x48)
-        buffer.put("Hijackv2".toByteArray())
-        buffer.put(0x51)
-        buffer.put("audioRoutingScore".toByteArray())
-        buffer.put(byteArrayOf(0x31, 0x2D, 0x01, 0x5F))
-        buffer.put("audioRoutingSetOwnershipToFalse".toByteArray())
-        buffer.put(0x01)
-        buffer.put(0x4B)
-        buffer.put("remotescore".toByteArray())
-        buffer.put(0xA5.toByte())
-
-        return opcode + buffer.array()
-    }
-
-    fun sendMediaInformataion(selfMacAddress: String, streamingState: Boolean = false): Boolean {
-        if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
-            // throw IllegalArgumentException("MAC address must be 6 bytes")
-            Log.d(TAG, "Invalid MAC address format, got: selfMacAddress=$selfMacAddress")
-            return false
-        }
-        Log.d(TAG, "SELFMAC: $selfMacAddress")
-        val targetMac = resolveSmartRoutingTarget(selfMacAddress)
-        if (targetMac == null) {
-            Log.w(TAG, "Cannot send Media Information packet: No remote Smart Routing host known")
-            return false
-        }
-        Log.d(TAG, "Sending Media Information packet to $targetMac")
-        return sendDataPacket(
-            createMediaInformationPacket(
-                selfMacAddress, targetMac, streamingState
-            )
-        )
-    }
-
-    fun createMediaInformationPacket(
-        selfMacAddress: String, targetMacAddress: String, streamingState: Boolean = true
-    ): ByteArray {
-        val opcode = byteArrayOf(Opcodes.SMART_ROUTING, 0x00)
-        val buffer = ByteBuffer.allocate(138)
-        buffer.put(
-            targetMacAddress.split(":").map { it.toInt(16).toByte() }.toByteArray().reversedArray()
-        )
-        buffer.put(
-            byteArrayOf(
-                0x82.toByte(), // related to the length
-                0x00
-            )
-        )
-        buffer.put(byteArrayOf(0x01, 0xE5.toByte(), 0x4A)) // unknown, constant
-        buffer.put("PlayingApp".toByteArray())
-        buffer.put(byteArrayOf(0x56)) // 'V', seems like an identifier or a separator
-        buffer.put("com.google.ios.youtube".toByteArray()) // package name, hardcoding for now, aforementioned reason
-        buffer.put(byteArrayOf(0x52)) // 'R'
-        buffer.put("HostStreamingState".toByteArray())
-        buffer.put(byteArrayOf(0x42)) // 'B'
-        buffer.put((if (streamingState) "YES" else "NO").toByteArray()) // streaming state
-        buffer.put(0x49) // 'I'
-        buffer.put("btAddress".toByteArray()) // self MAC
-        buffer.put(0x51) // 'Q'
-        buffer.put(selfMacAddress.toByteArray()) // self MAC
-        buffer.put("btName".toByteArray()) // self name
-        buffer.put(0x47) // 'D'
-        buffer.put("Android".toByteArray()) // if set to iPad, shows "Moved to iPad", but most likely we're running on a phone. setting to anything else of the same length will show iPhone instead.
-        buffer.put(0x58) // 'X'
-        buffer.put("otherDevice".toByteArray())
-        buffer.put("AudioCategory".toByteArray())
-        buffer.put(byteArrayOf(0x31, 0x2D, 0x01))
-
-        return opcode + buffer.array()
-    }
-
-    fun sendSmartRoutingShowUI(selfMacAddress: String): Boolean {
-        if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
-            // throw IllegalArgumentException("MAC address must be 6 bytes")
-            Log.w(TAG, "Invalid MAC address format, got: selfMacAddress=$selfMacAddress")
-            return false
-        }
-
-        val targetMac = resolveSmartRoutingTarget(selfMacAddress)
-        if (targetMac == null) {
-            Log.w(TAG, "Cannot send Smart Routing Show UI packet: No remote Smart Routing host known")
-            return false
-        }
-        Log.d(TAG, "Sending Smart Routing Show UI packet to $targetMac")
-        return sendDataPacket(createSmartRoutingShowUIPacket(targetMac))
-    }
-
-    fun createSmartRoutingShowUIPacket(targetMacAddress: String): ByteArray {
-        val opcode = byteArrayOf(Opcodes.SMART_ROUTING, 0x00)
-        val buffer = ByteBuffer.allocate(134)
-        buffer.put(
-            targetMacAddress.split(":").map { it.toInt(16).toByte() }.toByteArray().reversedArray()
-        )
-        buffer.put(byteArrayOf(0x7E, 0x00))
-        buffer.put(byteArrayOf(0x01, 0xE6.toByte(), 0x5B))
-        buffer.put("SmartRoutingKeyShowNearbyUI".toByteArray())
-        buffer.put(0x01) // separator?
-        buffer.put(0x4A)
-        buffer.put("localscore".toByteArray())
-        buffer.put(0x31, 0x2D)
-        buffer.put(0x01)
-        buffer.put(0x46)
-        buffer.put("reasonHhijackv2".toByteArray())
-        buffer.put(0x51.toByte())
-        buffer.put("audioRoutingScore".toByteArray())
-        buffer.put(0xA2.toByte())
-        buffer.put(0x5F)
-        buffer.put("audioRoutingSetOwnershipToFalse".toByteArray())
-        buffer.put(0x01)
-        buffer.put(0x4B)
-        buffer.put("remotescore".toByteArray())
-        buffer.put(0xA2.toByte())
-        return opcode + buffer.array()
-    }
-
-    fun sendHijackReversed(selfMacAddress: String): Boolean {
-        val targets = resolveSmartRoutingTargets(selfMacAddress)
-        if (targets.isEmpty()) {
-            Log.w(TAG, "Cannot send Hijack Reversed packet: No remote Smart Routing host known")
-            return false
-        }
-        var success = true
-        for (target in targets) {
-            Log.d(TAG, "Sending Hijack Reversed packet to $target")
-            success = sendDataPacket(createHijackReversedPacket(target)) && success
-        }
-        return success
-    }
-
-    fun createHijackReversedPacket(targetMacAddress: String): ByteArray {
-        val opcode = byteArrayOf(Opcodes.SMART_ROUTING, 0x00)
-        val buffer = ByteBuffer.allocate(97)
-        buffer.put(
-            targetMacAddress.split(":").map { it.toInt(16).toByte() }.toByteArray().reversedArray()
-        )
-        buffer.put(byteArrayOf(0x59, 0x00))
-        buffer.put(byteArrayOf(0x01, 0xE3.toByte()))
-        buffer.put(0x5F)
-        buffer.put("audioRoutingSetOwnershipToFalse".toByteArray())
-        buffer.put(0x01)
-        buffer.put(0x59)
-        buffer.put("audioRoutingShowReverseUI".toByteArray())
-        buffer.put(0x01)
-        buffer.put(0x46)
-        buffer.put("reason".toByteArray())
-        buffer.put(0x53)
-        buffer.put("ReverseBannerTapped".toByteArray())
-
-        return opcode + buffer.array()
-    }
-
-
-    fun sendAddTiPiDevice(selfMacAddress: String, targetMacAddress: String): Boolean {
+    fun sendAddTiPiDevice(
+        selfMacAddress: String,
+        targetMacAddress: String,
+        expectedLease: AacpSocketLease? = socketLease,
+    ): Boolean {
         if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")) || targetMacAddress.length != 17 || !targetMacAddress.matches(
                 Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
             )
@@ -1293,7 +961,10 @@ class AACPManager {
             return false
         }
         Log.d(TAG, "Sending Add TiPi Device packet to $targetMacAddress")
-        return sendDataPacket(createAddTiPiDevicePacket(selfMacAddress, targetMacAddress))
+        return sendDataPacket(
+            createAddTiPiDevicePacket(selfMacAddress, targetMacAddress),
+            expectedLease,
+        )
     }
 
     fun createAddTiPiDevicePacket(selfMacAddress: String, targetMacAddress: String): ByteArray {
@@ -1373,39 +1044,33 @@ class AACPManager {
         singlePressCustomized: Boolean = false,
         doublePressCustomized: Boolean = false,
         triplePressCustomized: Boolean = false,
-        longPressCustomized: Boolean = false
+        longPressCustomized: Boolean = false,
+        expectedLease: AacpSocketLease? = socketLease,
     ): Boolean {
         val value =
             ((if (singlePressCustomized) 0x01 else 0) or (if (doublePressCustomized) 0x02 else 0) or (if (triplePressCustomized) 0x04 else 0) or (if (longPressCustomized) 0x08 else 0)).toByte()
         Log.d(TAG, "Sending Stem Config Packet with value: ${value.toHexString()}")
         return sendControlCommand(
-            ControlCommandIdentifiers.STEM_CONFIG.value, value
+            ControlCommandIdentifiers.STEM_CONFIG.value,
+            value,
+            expectedLease,
         )
     }
 
     @OptIn(ExperimentalStdlibApi::class)
-    fun sendPacket(packet: ByteArray): Boolean = packetWriteCoordinator.runExclusive {
-        sendPacketLocked(packet, expectedLease = null)
-    }
-
-    @OptIn(ExperimentalStdlibApi::class)
-    private fun sendPacketLocked(
+    @Synchronized
+    fun sendPacket(
         packet: ByteArray,
-        expectedLease: AacpSocketLease?,
+        expectedLease: AacpSocketLease? = socketLease,
     ): Boolean {
-        // Bind every write, including ordinary control traffic, to the generation observed at
-        // entry. A replacement cannot make an old write close or target the new socket.
-        val effectiveLease = expectedLease ?: BluetoothConnectionManager.currentAacpSocketLease()
-        val activeSocket = effectiveLease?.socket
         if (packet.size < 5) {
             Log.w(TAG, "Refusing malformed AACP packet (${packet.size} bytes)")
             return false
         }
         try {
-            if (effectiveLease != null && !BluetoothConnectionManager.isCurrent(effectiveLease)) {
-                return false
-            }
-            if (packet[4] == Opcodes.CONTROL_COMMAND) {
+            Log.d(TAG, "Sending packet: ${packet.joinToString(" ") { "%02X".format(it) }}")
+
+            if (packet.size > 4 && packet[4] == Opcodes.CONTROL_COMMAND) {
                 val controlCommand = try {
                     ControlCommand.fromByteArray(packet)
                 } catch (e: Exception) {
@@ -1414,26 +1079,21 @@ class AACPManager {
                     return false
                 }
                 Log.d(
-                    TAG,
-                    "Sending control command " +
-                        "${ControlCommandIdentifiers.fromByte(controlCommand.identifier)?.name ?: "UNKNOWN"}"
-                )
+                    TAG, "Control command: ${controlCommand.identifier.toHexString()} - ${
+                    controlCommand.value.joinToString(" ") { "%02X".format(it) }
+                }")
+                if (ControlCommandIdentifiers.fromByte(controlCommand.identifier) == null) {
+                    return false
+                }
             }
 
-            if (BluetoothConnectionManager.writeAacpPacket(packet, effectiveLease)) {
+            if (BluetoothConnectionManager.writeAacpPacket(packet, expectedLease)) {
                 return true
-            }
-            Log.d(TAG, "Can't send packet: Socket not initialized or connected")
-            return false
-        } catch (e: Exception) {
-            if (effectiveLease != null) {
-                BluetoothConnectionManager.closeAacpGeneration(
-                    expectedSocket = effectiveLease.socket,
-                    expectedGeneration = effectiveLease.generation,
-                )
             } else {
-                BluetoothConnectionManager.invalidateAacpSocket(activeSocket)
+                Log.d(TAG, "Can't send packet: Socket not initialized or connected")
+                return false
             }
+        } catch (e: Exception) {
             Log.e(TAG, "Error sending packet: ${e.message}")
             return false
         }
@@ -1470,28 +1130,26 @@ class AACPManager {
     }
 
     fun parseAudioSourceResponse(data: ByteArray): Pair<String, AudioSourceType> {
-        if (data.size < 13) {
-            throw IllegalArgumentException("Data array too short to parse Audio Source Response")
+        Log.d(TAG, "Parsing Audio Source Response: ${data.joinToString(" ") { "%02X".format(it) }}")
+        val (sourceAddress, type) = AacpAudioSourceParser.parse(data)
+        if (type == AudioSourceType.UNKNOWN) {
+            Log.w(TAG, "Unknown active audio source type: ${data[12].toInt() and 0xFF}")
         }
-        if (data[4] != Opcodes.AUDIO_SOURCE) {
-            throw IllegalArgumentException("Data array does not start with AUDIO_SOURCE opcode")
-        }
-        val macBytes = data.sliceArray(6..11).reversedArray()
-        val mac = macBytes.joinToString(":") { "%02X".format(it) }
-        val typeByte = data[12]
-        val type = AudioSourceType.fromByte(typeByte)
-            ?: throw IllegalArgumentException("Unknown Audio Source Type: $typeByte")
-        return Pair(mac, type)
+        return sourceAddress to type
     }
 
     fun parseConnectedDevicesResponse(data: ByteArray): List<ConnectedDevice> {
+        Log.d(
+            TAG,
+            "Parsing Connected Devices Response: ${data.joinToString(" ") { "%02X".format(it) }}"
+        )
         if (data.size < 9) {
             throw IllegalArgumentException("Data array too short to parse Connected Devices Response")
         }
         if (data[4] != Opcodes.CONNECTED_DEVICES) {
             throw IllegalArgumentException("Data array does not start with CONNECTED_DEVICES opcode")
         }
-        val deviceCount = data[8].toInt()
+        val deviceCount = data[8].toInt() and 0xFF
         val devices = mutableListOf<ConnectedDevice>()
 
         var offset = 9
@@ -1515,7 +1173,9 @@ class AACPManager {
         return devices
     }
 
-    fun sendSomePacketIDontKnowWhatItIs() {
+    fun sendSomePacketIDontKnowWhatItIs(
+        expectedLease: AacpSocketLease? = socketLease,
+    ) {
         // 2900 00ff ffff ffff ffff -- enables setting EQ
         sendDataPacket(
             byteArrayOf(
@@ -1524,22 +1184,27 @@ class AACPManager {
                 0xFF.toByte(), 0xFF.toByte(),
                 0xFF.toByte(), 0xFF.toByte(),
                 0xFF.toByte(), 0xFF.toByte(),
-            )
+            ),
+            expectedLease,
         )
     }
 
-    fun disconnected() {
+    @Synchronized
+    fun disconnected(expectedLease: AacpSocketLease? = socketLease): Boolean {
+        val boundLease = socketLease
+        if (!AacpSessionCleanupGate.canClear(boundLease, expectedLease)) {
+            Log.d(TAG, "Ignoring stale AACP session cleanup")
+            return false
+        }
         Log.d(TAG, "Disconnected, clearing state")
+        socketLease = null
         controlCommandStatusList.clear()
         controlCommandListeners.clear()
         owns = false
-        requestedOwnership = null
-        if (connectedDevices.isNotEmpty()) {
-            rememberedConnectedDevices = connectedDevices.map { it.copy() }
-        }
-        oldConnectedDevices = connectedDevices
+        oldConnectedDevices = listOf()
         connectedDevices = listOf()
         audioSource = null
+        return true
     }
 
     fun parseInformationPacket(packet: ByteArray): AirPodsInformation {

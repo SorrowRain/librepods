@@ -20,7 +20,7 @@ If you are using a supported device/OS combination, you can install LibrePods fr
 
 ### GitHub Releases
 
-If you need xposed because of the [root requirement](#root-requirement), you will have to use the apk/zip from the [GitHub releases](https://github.com/kavishdevar/librepods/releases/latest).
+If you need Xposed because of the [root requirement](#root-requirement), use the APK and Root module ZIP from the same [SorrowRain release](https://github.com/SorrowRain/librepods/releases/latest).
 
 ### As a system app (root module)
 
@@ -28,15 +28,17 @@ If you want LibrePods to have privileged Bluetooth permissions to
 - show battery status in the system settings and widgets
 - show AirPods icon in the system settings (xposed is also currently required for this)
 - switch audio to phone speakers when you are not wearing your AirPods
+- keep ordinary Android audio on the phone while another connected device is already using the AirPods
+- provide head-tracking data to a compatible Android Spatializer
 
-you can install the root module. This is optional and only provides extra features, but it is not required for the app to work.
+you can install the Root module ZIP. The module is optional for the base app, but the other-device audio protection and root-backed spatial audio features require it. Always install the APK and Root module ZIP from the same release.
 
 > [!IMPORTANT]
 > When using the root module, do not install the Play Store version. There might be issues because of the signature mismatch between the Play Store version and the root module.
 
 ## Nightly/Development Builds
 
-Want to try the latest features before they're officially released? You can grab nightly builds from the [latest nightly release](https://github.com/kavishdevar/librepods/releases?q=nightly).
+Want to try the latest features before they're officially released? You can grab nightly builds from the [SorrowRain releases page](https://github.com/SorrowRain/librepods/releases?q=nightly).
 
 > [!WARNING]
 > These builds are automatically generated from the latest code and may contain new features and bug fixes that haven't been included in a stable release yet. However, please note that they may also be less stable than official releases, so use them at your own risk.

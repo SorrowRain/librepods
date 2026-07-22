@@ -47,21 +47,16 @@ object BluetoothConnectionManager {
     @Volatile
     private var aacpSocketGeneration: Long = 0L
 
-    fun installAacpSocket(socket: BluetoothSocket): Long {
-        synchronized(this) {
-            val previousSocket = aacpSocket
-            val nextGeneration = aacpSocketGeneration + 1L
-            aacpSocket = socket
-            aacpSocketGeneration = nextGeneration
-            if (previousSocket != null && previousSocket !== socket) {
-                runCatching { previousSocket.close() }
-            }
-            return nextGeneration
+    fun installAacpSocket(socket: BluetoothSocket): Long = synchronized(this) {
+        val previousSocket = aacpSocket
+        val nextGeneration = aacpSocketGeneration + 1L
+        aacpSocket = socket
+        aacpSocketGeneration = nextGeneration
+        if (previousSocket != null && previousSocket !== socket) {
+            runCatching { previousSocket.close() }
         }
+        nextGeneration
     }
-
-    @Synchronized
-    fun currentAacpSocketGeneration(): Long = aacpSocketGeneration
 
     @Synchronized
     fun currentAacpSocketLease(): AacpSocketLease? = aacpSocket?.let {
@@ -75,6 +70,15 @@ object BluetoothConnectionManager {
         leaseSocket = lease.socket,
         leaseGeneration = lease.generation,
     )
+
+    @Synchronized
+    fun isCurrent(socket: BluetoothSocket, generation: Long): Boolean =
+        AacpSocketLeaseGate.isCurrent(
+            currentSocket = aacpSocket,
+            currentGeneration = aacpSocketGeneration,
+            leaseSocket = socket,
+            leaseGeneration = generation,
+        )
 
     /**
      * Checks a lease and writes while holding the same lock used for socket replacement. This
@@ -115,16 +119,14 @@ object BluetoothConnectionManager {
     fun closeAacpGeneration(
         expectedSocket: BluetoothSocket,
         expectedGeneration: Long,
-    ): Boolean {
-        return synchronized(this) {
-            if (aacpSocketGeneration != expectedGeneration || aacpSocket !== expectedSocket) {
-                return@synchronized false
-            } else {
-                aacpSocket = null
-                aacpSocketGeneration++
-                runCatching { expectedSocket.close() }
-                true
-            }
+    ): Boolean = synchronized(this) {
+        if (aacpSocketGeneration != expectedGeneration || aacpSocket !== expectedSocket) {
+            false
+        } else {
+            aacpSocket = null
+            aacpSocketGeneration++
+            runCatching { expectedSocket.close() }
+            true
         }
     }
 }

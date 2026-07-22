@@ -106,19 +106,5 @@
             android:textStyle="bold"
             tools:ignore="HardcodedText" />
 
-        <ImageButton
-            android:id="@+id/island_action_button"
-            android:layout_width="64dp"
-            android:layout_height="64dp"
-            android:layout_gravity="center"
-            android:translationX="-12dp"
-            android:background="@drawable/ic_undo_button_bg"
-            android:contentDescription="@string/undo"
-            android:scaleType="centerInside"
-            android:src="@drawable/ic_undo"
-            android:tint="@android:color/white"
-            android:elevation="8dp"
-            android:translationZ="8dp"
-            android:visibility="gone" />
     </FrameLayout>
 </LinearLayout>

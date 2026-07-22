@@ -81,7 +81,6 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.R
-import me.kavishdevar.librepods.data.SmartRoutingAudioCategory
 import me.kavishdevar.librepods.presentation.components.AppInfoCard
 import me.kavishdevar.librepods.presentation.components.DeviceInfoCard
 import me.kavishdevar.librepods.presentation.components.StyledBottomSheet
@@ -107,8 +106,7 @@ fun AppSettingsScreen(
     navigateToPurchase: () -> Unit,
     navigateToTroubleshooting: () -> Unit,
     navigateToOpenSourceLicenses: () -> Unit,
-    navigateToReleaseNotesScreen: () -> Unit,
-    navigateToSmartRoutingAudioSources: () -> Unit
+    navigateToReleaseNotesScreen: () -> Unit
 ) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
@@ -293,50 +291,6 @@ fun AppSettingsScreen(
                 )
             }
 
-            StyledList(title = stringResource(R.string.takeover_airpods_state)) {
-                StyledToggle(
-                    label = stringResource(R.string.takeover_disconnected),
-                    description = stringResource(R.string.takeover_disconnected_desc),
-                    checked = state.takeoverWhenDisconnected,
-                    onCheckedChange = viewModel::setTakeoverWhenDisconnected,
-                    enabled = state.isPremium
-                )
-                StyledToggle(
-                    label = stringResource(R.string.takeover_idle),
-                    description = stringResource(R.string.takeover_idle_desc),
-                    checked = state.takeoverWhenIdle,
-                    onCheckedChange = viewModel::setTakeoverWhenIdle,
-                    enabled = state.isPremium
-                )
-                StyledToggle(
-                    label = stringResource(R.string.takeover_music),
-                    description = stringResource(R.string.takeover_music_desc),
-                    checked = state.takeoverWhenMusic,
-                    onCheckedChange = viewModel::setTakeoverWhenMusic,
-                    enabled = state.isPremium
-                )
-
-                StyledToggle(
-                    label = stringResource(R.string.takeover_call),
-                    description = stringResource(R.string.takeover_call_desc),
-                    checked = state.takeoverWhenCall,
-                    onCheckedChange = viewModel::setTakeoverWhenCall,
-                    enabled = state.isPremium
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            StyledList(title = stringResource(R.string.takeover_phone_state)) {
-                StyledToggle(
-                    label = stringResource(R.string.takeover_ringing_call),
-                    description = stringResource(R.string.takeover_ringing_call_desc),
-                    checked = state.takeoverWhenRingingCall,
-                    onCheckedChange = viewModel::setTakeoverWhenRingingCall,
-                    enabled = state.isPremium
-                )
-            }
-
             val spatialAudioControlsEnabled = state.spatialAudioCapabilityChecked &&
                 state.spatializerAvailable && !state.spatialAudioBusy
             StyledList(
@@ -429,22 +383,12 @@ fun AppSettingsScreen(
                     onCheckedChange = viewModel::setVendorAttSocket
                 )
                 StyledToggle(
-                    label = stringResource(R.string.smart_routing_auto_takeover),
-                    description = stringResource(R.string.smart_routing_auto_takeover_description),
-                    checked = state.smartRoutingAutoTakeover,
-                    onCheckedChange = viewModel::setSmartRoutingAutoTakeover
+                    label = stringResource(R.string.remote_device_audio_guard_enabled),
+                    description = stringResource(R.string.remote_device_audio_guard_enabled_description),
+                    checked = state.remoteDeviceGuardEnabled,
+                    onCheckedChange = viewModel::setRemoteDeviceGuardEnabled,
+                    enabled = state.vendorIdHook,
                 )
-                StyledList {
-                    StyledListItem(
-                        name = stringResource(R.string.smart_routing_audio_sources),
-                        description = stringResource(
-                            R.string.smart_routing_audio_sources_summary,
-                            state.smartRoutingAudioPolicy.enabledCategories.size,
-                            SmartRoutingAudioCategory.entries.size
-                        ),
-                        onClick = navigateToSmartRoutingAudioSources
-                    )
-                }
             }
         }
 

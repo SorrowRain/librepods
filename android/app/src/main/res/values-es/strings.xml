@@ -44,10 +44,6 @@
     <string name="noise_control_widget_description">Controla el modo de control de ruido desde tu pantalla de inicio.</string>
     <string name="island_connected_text">Conectado</string>
     <string name="island_connected_remote_text">Conectado a Linux</string>
-    <string name="island_taking_over_text">Conectado</string>
-    <string name="island_moved_to_remote_text">Transferido a Linux</string>
-    <string name="island_moved_to_other_device_text">Transferido a %1$s</string>
-    <string name="island_moved_to_other_device_reversed_text">Reconectar desde notificación</string>
     <string name="head_tracking">Seguimiento de Cabeza</string>
     <string name="head_gestures_details">Asiente para contestar y niega para rechazar.</string>
     <string name="general_settings_header">General</string>
@@ -65,22 +61,6 @@
     <string name="collect_logs">Recopilar registros</string>
     <string name="saved_logs">Guardar registros</string>
     <string name="no_logs_found">No se encontraron registros</string>
-    <string name="takeover_header">Preferencias de Autoconexión</string>
-    <string name="takeover_airpods_state">Conectar a tus AirPods cuando su estado sea:</string>
-    <string name="takeover_disconnected">Desconectado</string>
-    <string name="takeover_disconnected_desc">AirPods no conectados a ningún dispositivo</string>
-    <string name="takeover_idle">Inactivos</string>
-    <string name="takeover_idle_desc">Un dispositivo está conectado a tus AirPods, pero no está reproduciendo audio ni llamando</string>
-    <string name="takeover_music">Reproduciendo</string>
-    <string name="takeover_music_desc">Un dispositivo está reproduciendo audio en tus AirPods</string>
-    <string name="takeover_call">En llamada</string>
-    <string name="takeover_call_desc">Un dispositivo está en llamada con tus AirPods</string>
-    <string name="takeover_phone_state">Conectar a tus AirPods cuando el teléfono esté:</string>
-    <string name="takeover_ringing_call">Llamada entrante</string>
-    <string name="takeover_ringing_call_desc">El teléfono empieza a sonar</string>
-    <string name="takeover_media_start">Iniciando reproducción</string>
-    <string name="takeover_media_start_desc">El teléfono empieza a reproducir audio</string>
-    <string name="undo">Deshacer</string>
     <string name="customize_transparency_mode_description">Puedes personalizar el modo Transparencia de tus AirPods Pro para oír mejor tu entorno.</string>
     <string name="loud_sound_reduction_description">Reducción de Sonidos Fuertes puede reducir activamente la exposición a entornos ruidosos en modo Transparencia y Adaptativo. Reducción de Sonidos Fuertes no está activa en modo Desactivado.</string>
     <string name="loud_sound_reduction">Reducción de Sonidos Fuertes</string>
@@ -214,5 +194,5 @@
     <string name="show_bottom_sheet_popup">Ventana emergente inferior</string>
     <string name="show_bottom_sheet_popup_description">Muestra la ventana emergente estilo iOS en la parte inferior cuando los AirPods se conectan.</string>
     <string name="show_island_popup">Ventana emergente Dynamic Island</string>
-    <string name="show_island_popup_description">Muestra la ventana emergente estilo Dynamic Island en la parte superior para eventos de conexión y traspaso.</string>
+    <string name="show_island_popup_description">Muestra la ventana emergente estilo Dynamic Island en la parte superior para eventos de conexión.</string>
 </resources>
