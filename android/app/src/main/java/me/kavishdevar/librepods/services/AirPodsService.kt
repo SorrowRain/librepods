@@ -205,6 +205,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private val audioFeatureScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val aacpReaderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val remoteDeviceGuardScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private data class ConnectionNotificationContent(
+        val title: String?,
+        val text: String,
+    )
+    private val connectionNotificationLock = Any()
+    private var lastConnectionNotificationContent: ConnectionNotificationContent? = null
     private val remoteDeviceAudioGuard = RemoteDeviceAudioGuard()
     private data class RemoteDeviceGuardMessage(
         val event: RemoteDeviceAudioGuardEvent,
@@ -1364,12 +1370,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     setPackage(packageName)
                 })
                 updateBattery()
-                updateNotificationContent(
-                    true,
-                    this@AirPodsService.getSharedPreferences("settings", MODE_PRIVATE)
-                        .getString("name", device?.name),
-                    batteryNotification.getBattery()
-                )
 //                CrossDevice.sendRemotePacket(batteryInfo)
 //                CrossDevice.batteryBytes = batteryInfo
 
@@ -1533,6 +1533,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     Intent(AirPodsNotifications.AIRPODS_INFORMATION_UPDATED).setPackage(
                         packageName
                     )
+                )
+                updateNotificationContent(
+                    true,
+                    deviceInformation.name,
+                    batteryNotification.getBattery(),
                 )
             }
 
@@ -2517,6 +2522,21 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     ) {
         val notificationManager = getSystemService(NotificationManager::class.java)
 
+        if (!connected) {
+            synchronized(connectionNotificationLock) {
+                lastConnectionNotificationContent = null
+            }
+            notificationManager.cancel(2)
+            return
+        }
+
+        if (BluetoothConnectionManager.aacpSocket?.isConnected != true) {
+            if (!config.bleOnlyMode) {
+                showSocketConnectionFailureNotification("BluetoothConnectionManager.aacpSocket? created, but not connected. Check logs")
+            }
+            return
+        }
+
         val notificationIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -2525,51 +2545,53 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        if (BluetoothConnectionManager.aacpSocket == null) {
-            return
-        }
-        if (BluetoothConnectionManager.aacpSocket?.isConnected == true) {
+        val title = airpodsName ?: config.deviceName
+        val text = """${
+            batteryList?.find { it.component == BatteryComponent.LEFT }?.let {
+                if (it.status != BatteryStatus.DISCONNECTED) {
+                    "L: ${if (it.status == BatteryStatus.CHARGING) "⚡" else ""} ${it.level}%"
+                } else {
+                    ""
+                }
+            } ?: ""
+        } ${
+            batteryList?.find { it.component == BatteryComponent.RIGHT }?.let {
+                if (it.status != BatteryStatus.DISCONNECTED) {
+                    "R: ${if (it.status == BatteryStatus.CHARGING) "⚡" else ""} ${it.level}%"
+                } else {
+                    ""
+                }
+            } ?: ""
+        } ${
+            batteryList?.find { it.component == BatteryComponent.CASE }?.let {
+                if (it.status != BatteryStatus.DISCONNECTED) {
+                    "Case: ${if (it.status == BatteryStatus.CHARGING) "⚡" else ""} ${it.level}%"
+                } else {
+                    ""
+                }
+            } ?: ""
+        }"""
+        val content = ConnectionNotificationContent(title, text)
+
+        synchronized(connectionNotificationLock) {
+            if (BluetoothConnectionManager.aacpSocket?.isConnected != true) return
+            // HyperOS unfolds a folded notification on every notify() update.
+            if (lastConnectionNotificationContent == content) return
+
             val updatedNotificationBuilder =
                 NotificationCompat.Builder(this, "airpods_connection_status")
-                    .setSmallIcon(R.drawable.airpods)
-                    .setContentTitle(airpodsName ?: config.deviceName).setContentText(
-                        """${
-                        batteryList?.find { it.component == BatteryComponent.LEFT }?.let {
-                            if (it.status != BatteryStatus.DISCONNECTED) {
-                                "L: ${if (it.status == BatteryStatus.CHARGING) "⚡" else ""} ${it.level}%"
-                            } else {
-                                ""
-                            }
-                        } ?: ""
-                    } ${
-                        batteryList?.find { it.component == BatteryComponent.RIGHT }?.let {
-                            if (it.status != BatteryStatus.DISCONNECTED) {
-                                "R: ${if (it.status == BatteryStatus.CHARGING) "⚡" else ""} ${it.level}%"
-                            } else {
-                                ""
-                            }
-                        } ?: ""
-                    } ${
-                        batteryList?.find { it.component == BatteryComponent.CASE }?.let {
-                            if (it.status != BatteryStatus.DISCONNECTED) {
-                                "Case: ${if (it.status == BatteryStatus.CHARGING) "⚡" else ""} ${it.level}%"
-                            } else {
-                                ""
-                            }
-                        } ?: ""
-                    }""").setContentIntent(pendingIntent).setCategory(Notification.CATEGORY_STATUS)
-                    .setPriority(NotificationCompat.PRIORITY_LOW).setOngoing(true)
+                    .setSmallIcon(R.drawable.airpods).setContentTitle(title).setContentText(text)
+                    .setContentIntent(pendingIntent).setCategory(Notification.CATEGORY_STATUS)
+                    .setPriority(NotificationCompat.PRIORITY_LOW).setOngoing(true).setSilent(true)
+                    .setOnlyAlertOnce(true).setShowWhen(false)
 
             val updatedNotification = updatedNotificationBuilder.build()
                 .applyMiuiFoldTimeout()
 
             notificationManager.notify(2, updatedNotification)
-            notificationManager.cancel(1)
-        } else if (!connected) {
-            notificationManager.cancel(2)
-        } else if (!config.bleOnlyMode && BluetoothConnectionManager.aacpSocket?.isConnected != true) {
-            showSocketConnectionFailureNotification("BluetoothConnectionManager.aacpSocket? created, but not connected. Check logs")
+            lastConnectionNotificationContent = content
         }
+        notificationManager.cancel(1)
     }
 
     fun handleIncomingCall() {
@@ -3300,11 +3322,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                                     setPackage(packageName)
                                 })
 //                                    CrossDevice.sendReceivedPacket(data)
-                                updateNotificationContent(
-                                    true,
-                                    sharedPreferences.getString("name", device.name),
-                                    batteryNotification.getBattery()
-                                )
 
                                 if (!isHeadTrackingData(data)) {
                                     Log.d("AirPodsData", "Data received: $formattedHex")
