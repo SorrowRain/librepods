@@ -1,7 +1,10 @@
 package me.kavishdevar.librepods.bluetooth
 
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class BLEManagerStatusTest {
@@ -73,5 +76,80 @@ class BLEManagerStatusTest {
                 lidOpen = false,
             )
         )
+    }
+
+    @Test
+    fun `reconnect budget resets only for a new presence episode`() {
+        val gate = ReconnectEpisodeGate(
+            maxInitialConnectAttempts = 2,
+            maxProfileRepairAttempts = 2,
+            maxControlReconnectAttempts = 3,
+        )
+        val firstInitial = assertNotNull(gate.tryBeginInitialConnect())
+        val firstGeneration = firstInitial.generation
+
+        assertNull(gate.tryBeginInitialConnect())
+        gate.finishInitialConnect(firstInitial, succeeded = true)
+        assertNull(gate.tryBeginInitialConnect())
+        val firstRepair = assertNotNull(gate.tryBeginProfileRepair())
+        assertEquals(1, firstRepair.attempt)
+        assertNull(gate.tryBeginProfileRepair())
+        gate.finishProfileRepair(firstRepair)
+        val secondRepair = assertNotNull(gate.tryBeginProfileRepair())
+        assertEquals(2, secondRepair.attempt)
+        gate.finishProfileRepair(secondRepair)
+        assertNull(gate.tryBeginProfileRepair())
+
+        repeat(3) { index ->
+            val controlPermit = assertNotNull(gate.tryBeginControlReconnect())
+            assertEquals(index + 1, controlPermit.attempt)
+            assertNull(gate.tryBeginControlReconnect())
+            gate.finishControlReconnect(controlPermit)
+        }
+        assertNull(gate.tryBeginControlReconnect())
+        assertTrue(gate.isCurrent(firstGeneration))
+
+        gate.reset()
+
+        val secondGeneration = assertNotNull(gate.tryBeginInitialConnect()).generation
+        assertFalse(gate.isCurrent(firstGeneration))
+        assertTrue(gate.isCurrent(secondGeneration))
+        assertEquals(1, assertNotNull(gate.tryBeginProfileRepair()).attempt)
+        assertEquals(1, assertNotNull(gate.tryBeginControlReconnect()).attempt)
+    }
+
+    @Test
+    fun `failed early reconnect leaves one retry for the in-ear edge`() {
+        val gate = ReconnectEpisodeGate(maxInitialConnectAttempts = 2)
+        val lidOpen = assertNotNull(gate.tryBeginInitialConnect())
+
+        gate.finishInitialConnect(lidOpen, succeeded = false)
+
+        val inEar = assertNotNull(gate.tryBeginInitialConnect())
+        assertEquals(2, inEar.attempt)
+        gate.finishInitialConnect(inEar, succeeded = false)
+        assertNull(gate.tryBeginInitialConnect())
+    }
+
+    @Test
+    fun `finishing stale reconnect work cannot release a new episode permit`() {
+        val gate = ReconnectEpisodeGate()
+        val staleProfile = assertNotNull(gate.tryBeginProfileRepair())
+        val staleControl = assertNotNull(gate.tryBeginControlReconnect())
+
+        gate.reset()
+        val currentProfile = assertNotNull(gate.tryBeginProfileRepair())
+        val currentControl = assertNotNull(gate.tryBeginControlReconnect())
+
+        gate.finishProfileRepair(staleProfile)
+        gate.finishControlReconnect(staleControl)
+
+        assertNull(gate.tryBeginProfileRepair())
+        assertNull(gate.tryBeginControlReconnect())
+
+        gate.finishProfileRepair(currentProfile)
+        gate.finishControlReconnect(currentControl)
+        assertEquals(2, assertNotNull(gate.tryBeginProfileRepair()).attempt)
+        assertEquals(2, assertNotNull(gate.tryBeginControlReconnect()).attempt)
     }
 }
