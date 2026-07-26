@@ -80,8 +80,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -113,6 +116,9 @@ import me.kavishdevar.librepods.data.BatteryComponent
 import me.kavishdevar.librepods.data.BatteryStatus
 import me.kavishdevar.librepods.data.Capability
 import me.kavishdevar.librepods.data.CustomEq
+import me.kavishdevar.librepods.data.GuardHealth
+import me.kavishdevar.librepods.data.GuardHealthLevel
+import me.kavishdevar.librepods.data.GuardHealthReason
 import me.kavishdevar.librepods.data.LocalHostIdentity
 import me.kavishdevar.librepods.data.RemoteDeviceAudioGuard
 import me.kavishdevar.librepods.data.RemoteDeviceAudioGuardAction
@@ -135,6 +141,7 @@ import me.kavishdevar.librepods.utils.RootAvrcpVolumeController
 import me.kavishdevar.librepods.utils.RootSpatialAudioController
 import me.kavishdevar.librepods.utils.SpatialAudioMode
 import me.kavishdevar.librepods.utils.SystemApisUtils
+import me.kavishdevar.librepods.utils.XposedState
 import me.kavishdevar.librepods.utils.SystemApisUtils.DEVICE_TYPE_UNTETHERED_HEADSET
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_COMPANION_APP
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_DEVICE_TYPE
@@ -175,18 +182,24 @@ private fun Notification.applyMiuiFoldTimeout(): Notification = apply {
 }
 
 object ServiceManager {
-    private var service: AirPodsService? = null
+    private val _serviceFlow = MutableStateFlow<AirPodsService?>(null)
 
-    @Synchronized
-    fun getService(): AirPodsService? {
-        return service
-    }
+    /** Emits the live service instance so observers can re-bind after a restart. */
+    val serviceFlow: StateFlow<AirPodsService?> get() = _serviceFlow
 
-    @Synchronized
+    fun getService(): AirPodsService? = _serviceFlow.value
+
     fun setService(service: AirPodsService?) {
-        this.service = service
+        _serviceFlow.value = service
     }
 }
+
+/** Guard health of whichever service instance is currently alive. */
+@OptIn(ExperimentalCoroutinesApi::class)
+val guardHealthFlow: Flow<GuardHealth?> =
+    ServiceManager.serviceFlow.flatMapLatest { service ->
+        service?.guardHealth ?: flowOf(null)
+    }
 
 // @Suppress("unused")
 class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeListener {
@@ -208,6 +221,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private data class ConnectionNotificationContent(
         val title: String?,
         val text: String,
+        val guardLine: String?,
     )
     private val connectionNotificationLock = Any()
     private var lastConnectionNotificationContent: ConnectionNotificationContent? = null
@@ -300,6 +314,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private val packetLogKey = "packet_log"
     private val _packetLogsFlow = MutableStateFlow<Set<String>>(emptySet())
     val packetLogsFlow: StateFlow<Set<String>> get() = _packetLogsFlow
+    private val _guardHealth = MutableStateFlow(GuardHealth())
+    val guardHealth: StateFlow<GuardHealth> get() = _guardHealth
+    @Volatile
+    private var lastGuardNotificationLine: String? = null
 
     private lateinit var telephonyManager: TelephonyManager
     private lateinit var phoneStateListener: TelephonyCallback
@@ -437,6 +455,15 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
         override fun onDeviceDisappeared() {
             Log.d(TAG, "All disappeared")
+            // BLE scan gaps (batching pauses, pocket attenuation) can fake a disappearance
+            // while the control link is healthy; resetting then would close an in-flight
+            // AACP socket and flip the notification for a device that is still present.
+            if (BluetoothConnectionManager.aacpSocket?.isConnected == true ||
+                pendingAacpSocket != null
+            ) {
+                Log.d(TAG, "Ignoring BLE disappearance while AACP is connected or connecting")
+                return
+            }
             resetReconnectPresenceEpisode("ble_device_disappeared")
             updateNotificationContent(
                 false
@@ -543,6 +570,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
         aacpReaderScope.launch {
             var socketConnected = false
+            // Only a permit that actually drove a connect attempt has earned a refund;
+            // otherwise an already-healthy link would make attempts free and unbounded.
+            var attemptedConnect = false
             try {
                 if (!isAutomaticReconnectAllowed(lifecycleToken, reconnectEpisodeGeneration)) {
                     return@launch
@@ -564,6 +594,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     ) {
                         break
                     }
+                    attemptedConnect = true
                     connectToSocket(
                         adapter,
                         target,
@@ -596,7 +627,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 presencePermit?.let {
                     reconnectEpisodeGate.finishInitialConnect(it, socketConnected)
                 }
-                controlRepairPermit?.let(reconnectEpisodeGate::finishControlReconnect)
+                controlRepairPermit?.let {
+                    reconnectEpisodeGate.finishControlReconnect(
+                        it,
+                        succeeded = socketConnected && attemptedConnect,
+                    )
+                }
                 reconnectLifecycleGate.finish(lifecycleToken)
             }
         }
@@ -676,6 +712,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         Log.i(TAG, "Scheduling bounded audio profile repair ${permit.attempt}: $reason")
         aacpReaderScope.launch {
             var retryRequired = false
+            // See requestAutomaticReconnect: refunds are for permits that did the work.
+            var attemptedConnect = false
             try {
                 if (delayMs > 0L) delay(delayMs)
                 if (isAirPodsA2dpConnected ||
@@ -692,6 +730,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     }
                     return@launch
                 }
+                attemptedConnect = true
                 connectAudio(
                     this@AirPodsService,
                     target,
@@ -708,7 +747,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         hasFreshInEarBlePresence()
                 }
             } finally {
-                reconnectEpisodeGate.finishProfileRepair(permit)
+                reconnectEpisodeGate.finishProfileRepair(
+                    permit,
+                    succeeded = isAirPodsA2dpConnected && attemptedConnect,
+                )
             }
             if (retryRequired) {
                 requestBoundedAudioProfileRepair(
@@ -871,11 +913,45 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             transition.current.state == RemoteDeviceAudioGuardState.IDLE ||
             transition.current.state == RemoteDeviceAudioGuardState.LOCAL
 
+        refreshGuardHealth()
+
         if (serviceShuttingDown) {
             runCatching {
                 PhoneSoundRoutingController.setGuardEnabled(false, "service shutdown")
             }
             runCatching { remoteDeviceRemotePreferences.setA2dpStartGuardLease(0L) }
+        }
+    }
+
+    private fun refreshGuardHealth() {
+        val snapshot = remoteDeviceAudioGuard.snapshot
+        val barrierStatus = PhoneSoundRoutingController.status
+        val nativeTransportAvailable = runCatching {
+            remoteDeviceRemotePreferences.isAvailable() && XposedState.bluetoothScopeEnabled
+        }.getOrDefault(false)
+        val health = GuardHealth.evaluate(
+            enabled = snapshot.enabled,
+            barrierState = barrierStatus.state,
+            barrierActive = barrierStatus.active,
+            nativeLeaseAvailable = nativeTransportAvailable,
+            localMacResolved = localMac.isNotEmpty(),
+            aacpConnected = snapshot.aacpConnected,
+            guardState = snapshot.state,
+        )
+        if (_guardHealth.value == health) return
+        val levelChanged = _guardHealth.value.level != health.level ||
+            _guardHealth.value.reasons != health.reasons
+        _guardHealth.value = health
+        if (levelChanged) Log.i(TAG, "Guard health: ${health.level} ${health.reasons}")
+
+        // guardState flips between REMOTE_ACTIVE and REMOTE_GRACE about once a second while
+        // a remote host streams, so refresh the notification only when the rendered line
+        // actually changes — otherwise HyperOS unfolds the notification at 1 Hz.
+        val guardLine = guardNotificationLine()
+        if (guardLine == lastGuardNotificationLine) return
+        lastGuardNotificationLine = guardLine
+        if (BluetoothConnectionManager.aacpSocket?.isConnected == true) {
+            updateNotificationContent(true, config.deviceName, batteryNotification.getBattery())
         }
     }
 
@@ -2571,7 +2647,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 }
             } ?: ""
         }"""
-        val content = ConnectionNotificationContent(title, text)
+        val guardLine = guardNotificationLine()
+        val content = ConnectionNotificationContent(title, text, guardLine)
 
         synchronized(connectionNotificationLock) {
             if (BluetoothConnectionManager.aacpSocket?.isConnected != true) return
@@ -2585,6 +2662,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     .setPriority(NotificationCompat.PRIORITY_LOW).setOngoing(true).setSilent(true)
                     .setOnlyAlertOnce(true).setShowWhen(false)
 
+            if (guardLine != null) {
+                updatedNotificationBuilder.setSubText(guardLine)
+                updatedNotificationBuilder.setStyle(
+                    NotificationCompat.BigTextStyle().bigText("$text\n$guardLine")
+                )
+            }
+
             val updatedNotification = updatedNotificationBuilder.build()
                 .applyMiuiFoldTimeout()
 
@@ -2592,6 +2676,38 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             lastConnectionNotificationContent = content
         }
         notificationManager.cancel(1)
+    }
+
+    /** One line describing protection state, or null when there is nothing worth saying. */
+    private fun guardNotificationLine(): String? {
+        val health = _guardHealth.value
+        val reasonText = health.primaryReason?.let { reason ->
+            getString(
+                when (reason) {
+                    GuardHealthReason.PERMISSION_MISSING ->
+                        R.string.guard_health_reason_permission_missing
+                    GuardHealthReason.BARRIER_FAILED -> R.string.guard_health_reason_barrier_failed
+                    GuardHealthReason.BARRIER_STUCK -> R.string.guard_health_reason_barrier_stuck
+                    GuardHealthReason.LOCAL_MAC_UNKNOWN ->
+                        R.string.guard_health_reason_local_mac_unknown
+                    GuardHealthReason.NATIVE_TRANSPORT_MISSING ->
+                        R.string.guard_health_reason_native_transport_missing
+                    GuardHealthReason.DISABLED_BY_USER -> R.string.guard_health_reason_disabled
+                }
+            )
+        }
+        // Only speak up while the guard is actually trying to protect something. A standing
+        // "not active" line would otherwise sit in the notification forever on installs
+        // without the root module, drowning out the line that matters.
+        val protecting = health.guardState == RemoteDeviceAudioGuardState.REMOTE_ACTIVE ||
+            health.guardState == RemoteDeviceAudioGuardState.REMOTE_GRACE
+        if (!protecting) return null
+        return when (health.level) {
+            GuardHealthLevel.INACTIVE ->
+                getString(R.string.guard_notification_inactive, reasonText.orEmpty())
+            // The speaker barrier still holds; only the native A2DP block is missing.
+            else -> getString(R.string.guard_notification_protecting)
+        }
     }
 
     fun handleIncomingCall() {
@@ -2886,6 +3002,25 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             }
             val action = intent.action
             val context = context?.applicationContext
+            if (action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val adapterState = intent.getIntExtra(
+                    BluetoothAdapter.EXTRA_STATE,
+                    BluetoothAdapter.ERROR,
+                )
+                Log.d(TAG, "Bluetooth adapter state changed: $adapterState")
+                if (this@AirPodsService::bleManager.isInitialized) {
+                    when (adapterState) {
+                        BluetoothAdapter.STATE_ON -> {
+                            resetReconnectPresenceEpisode("adapter_on")
+                            bleManager.startScanning()
+                        }
+                        BluetoothAdapter.STATE_TURNING_OFF,
+                        BluetoothAdapter.STATE_OFF,
+                        -> bleManager.stopScanning()
+                    }
+                }
+                return
+            }
             val name = context?.getSharedPreferences("settings", MODE_PRIVATE)
                 ?.getString("name", bluetoothDevice?.name)
             if (bluetoothDevice != null && !action.isNullOrEmpty()) {
