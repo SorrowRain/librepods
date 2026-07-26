@@ -706,7 +706,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private fun remoteHostOwnsAudio(): Boolean {
         val state = remoteDeviceAudioGuard.snapshot.state
         return state == RemoteDeviceAudioGuardState.REMOTE_ACTIVE ||
-            state == RemoteDeviceAudioGuardState.REMOTE_GRACE
+            state == RemoteDeviceAudioGuardState.REMOTE_GRACE ||
+            // Ownership is still unknown here and the barrier is already up, so grabbing the
+            // audio profiles now would contradict the protection we are applying. The probe
+            // resolves in well under two seconds and the repair runs then.
+            state == RemoteDeviceAudioGuardState.PROBING
     }
 
     private fun requestBoundedAudioProfileRepair(
