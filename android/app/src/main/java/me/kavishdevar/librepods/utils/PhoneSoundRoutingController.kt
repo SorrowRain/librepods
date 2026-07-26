@@ -212,24 +212,29 @@ object PhoneSoundRoutingController {
             if (targets.isEmpty()) return@runCatching false
 
             markPreferredRouteApplied(true)
-            var anyApplied = false
-            targets.forEach { strategy ->
+            val accepted = targets.filter { strategy ->
                 runCatching { setPreferredDevice.invoke(audioManager, strategy, speakerAttributes) }
-                    .onSuccess { anyApplied = true }
                     .onFailure { error ->
                         Log.w(TAG, "Preferred speaker route rejected for one strategy", unwrap(error))
                     }
+                    .isSuccess
             }
-            preferredRouteStrategies = if (anyApplied) targets else emptyList()
-            if (!anyApplied) markPreferredRouteApplied(false)
-            anyApplied
+            // Clear whatever was accepted even if only part of the set applied.
+            preferredRouteStrategies = accepted
+            if (accepted.isEmpty()) markPreferredRouteApplied(false)
+            accepted.isNotEmpty()
         }.getOrElse { error ->
             // Hidden API missing or renamed on this ROM: keep the mix and carry on.
             Log.w(TAG, "Preferred speaker route unavailable", unwrap(error))
             markPreferredRouteApplied(false)
             false
         }
-        if (applied) Log.i(TAG, "Preferred speaker route applied to ${preferredRouteStrategies.size} strategies")
+        if (applied) {
+            Log.i(
+                TAG,
+                "Preferred speaker route applied to ${preferredRouteStrategies.size} strategies"
+            )
+        }
         return applied
     }
 
