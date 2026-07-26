@@ -13,7 +13,12 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.billing.BillingManager
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import me.kavishdevar.librepods.data.GuardHealthLevel
+import me.kavishdevar.librepods.data.GuardHealthReason
 import me.kavishdevar.librepods.data.XposedRemotePrefProvider
+import me.kavishdevar.librepods.services.guardHealthFlow
 import me.kavishdevar.librepods.utils.RootSpatialAudioController
 import me.kavishdevar.librepods.utils.SpatialAudioMode
 import kotlin.math.roundToInt
@@ -37,6 +42,8 @@ data class AppSettingsUiState(
     val vendorIdHook: Boolean = false,
     val vendorAttSocket: Boolean = false,
     val remoteDeviceGuardEnabled: Boolean = true,
+    val guardHealthLevel: GuardHealthLevel? = null,
+    val guardHealthReason: GuardHealthReason? = null,
     val isPremium: Boolean = false,
     val connectionSuccessful: Boolean = false,
     val showBottomSheetPopup: Boolean = true,
@@ -74,7 +81,26 @@ class AppSettingsViewModel(application: Application) : AndroidViewModel(applicat
         loadSettings()
         refreshSpatialAudioCapability()
         observeBilling()
+        observeGuardHealth()
         sharedPreferences.registerOnSharedPreferenceChangeListener(sharedPrefListener)
+    }
+
+    private fun observeGuardHealth() {
+        viewModelScope.launch {
+            // guardState churns once a second while a remote host streams; the toggle
+            // subtitle only renders level and reason, so drop the rest.
+            guardHealthFlow
+                .map { it?.level to it?.primaryReason }
+                .distinctUntilChanged()
+                .collect { (level, reason) ->
+                    _uiState.update {
+                        it.copy(
+                            guardHealthLevel = level,
+                            guardHealthReason = reason,
+                        )
+                    }
+                }
+        }
     }
 
     override fun onCleared() {

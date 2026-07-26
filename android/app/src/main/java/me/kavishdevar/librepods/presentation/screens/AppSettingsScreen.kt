@@ -81,8 +81,10 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.data.GuardHealthLevel
 import me.kavishdevar.librepods.presentation.components.AppInfoCard
 import me.kavishdevar.librepods.presentation.components.DeviceInfoCard
+import me.kavishdevar.librepods.presentation.components.guardHealthReasonText
 import me.kavishdevar.librepods.presentation.components.StyledBottomSheet
 import me.kavishdevar.librepods.presentation.components.StyledButton
 import me.kavishdevar.librepods.presentation.components.StyledIconButton
@@ -382,15 +384,34 @@ fun AppSettingsScreen(
                     checked = state.vendorAttSocket,
                     onCheckedChange = viewModel::setVendorAttSocket
                 )
-                StyledToggle(
-                    label = stringResource(R.string.remote_device_audio_guard_enabled),
-                    description = stringResource(R.string.remote_device_audio_guard_enabled_description),
-                    checked = state.remoteDeviceGuardEnabled,
-                    onCheckedChange = viewModel::setRemoteDeviceGuardEnabled,
-                    enabled = state.vendorIdHook,
-                )
             }
         }
+
+        // Always visible: the guard governs audio routing on every install, including
+        // ones where Xposed is absent and the toggle used to be hidden entirely.
+        val guardStatusText = when {
+            !state.remoteDeviceGuardEnabled -> stringResource(R.string.guard_health_status_disabled)
+            state.guardHealthLevel == GuardHealthLevel.INACTIVE -> stringResource(
+                R.string.guard_health_status_inactive,
+                guardHealthReasonText(state.guardHealthReason),
+            )
+            state.guardHealthLevel == GuardHealthLevel.DEGRADED -> stringResource(
+                R.string.guard_health_status_degraded,
+                guardHealthReasonText(state.guardHealthReason),
+            )
+            state.guardHealthLevel == GuardHealthLevel.ACTIVE ->
+                stringResource(R.string.guard_health_status_active)
+            else -> null
+        }
+        StyledToggle(
+            label = stringResource(R.string.remote_device_audio_guard_enabled),
+            description = listOfNotNull(
+                guardStatusText,
+                stringResource(R.string.remote_device_audio_guard_enabled_description),
+            ).joinToString(" · "),
+            checked = state.remoteDeviceGuardEnabled,
+            onCheckedChange = viewModel::setRemoteDeviceGuardEnabled,
+        )
 
         if (!BuildConfig.PLAY_BUILD) {
             Spacer(modifier = Modifier.height(16.dp))

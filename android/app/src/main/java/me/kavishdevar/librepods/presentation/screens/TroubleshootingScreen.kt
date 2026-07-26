@@ -96,6 +96,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.data.GuardHealth
+import me.kavishdevar.librepods.data.GuardHealthLevel
+import me.kavishdevar.librepods.presentation.components.guardHealthReasonText
+import me.kavishdevar.librepods.presentation.components.guardHealthRemedyText
+import me.kavishdevar.librepods.services.guardHealthFlow
 import me.kavishdevar.librepods.utils.LogCollector
 import java.io.File
 import java.text.SimpleDateFormat
@@ -227,6 +232,11 @@ fun TroubleshootingScreen() {
                 .padding(horizontal = 16.dp)
         ) {
             Spacer(modifier = Modifier.height(topPadding))
+
+            GuardHealthCard(
+                backgroundColor = backgroundColor,
+                textColor = textColor,
+            )
 
             Text(
                 text = stringResource(R.string.saved_logs),
@@ -918,3 +928,92 @@ fun TroubleshootingScreen() {
         }
     }
 }
+
+@Composable
+private fun GuardHealthCard(
+    backgroundColor: Color,
+    textColor: Color,
+) {
+    var health by remember { mutableStateOf<GuardHealth?>(null) }
+
+    LaunchedEffect(Unit) {
+        guardHealthFlow.collect { health = it }
+    }
+
+    val current = health ?: return
+    val statusText = when (current.level) {
+        GuardHealthLevel.ACTIVE -> stringResource(R.string.guard_health_status_active)
+        GuardHealthLevel.DISABLED -> stringResource(R.string.guard_health_status_disabled)
+        GuardHealthLevel.DEGRADED -> stringResource(
+            R.string.guard_health_status_degraded,
+            guardHealthReasonText(current.primaryReason),
+        )
+        GuardHealthLevel.INACTIVE -> stringResource(
+            R.string.guard_health_status_inactive,
+            guardHealthReasonText(current.primaryReason),
+        )
+    }
+
+    Text(
+        text = stringResource(R.string.guard_health_title),
+        style = TextStyle(
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            color = textColor.copy(alpha = 0.6f),
+            fontFamily = FontFamily(Font(R.font.sf_pro))
+        ),
+        modifier = Modifier.padding(16.dp, bottom = 4.dp, top = 8.dp)
+    )
+
+    Spacer(modifier = Modifier.height(2.dp))
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(backgroundColor, RoundedCornerShape(28.dp))
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
+        Text(
+            text = statusText,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Medium,
+            color = textColor,
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        listOf(
+            stringResource(R.string.guard_health_barrier) to current.barrierState,
+            stringResource(R.string.guard_health_native_lease) to
+                current.nativeLeaseAvailable.asAvailability(),
+            stringResource(R.string.guard_health_local_mac) to
+                current.localMacResolved.asAvailability(),
+            stringResource(R.string.guard_health_aacp) to current.aacpConnected.asAvailability(),
+            stringResource(R.string.guard_health_state) to current.guardState.name,
+        ).forEach { (label, value) ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(text = label, fontSize = 14.sp, color = textColor.copy(alpha = 0.7f))
+                Text(text = value, fontSize = 14.sp, color = textColor)
+            }
+        }
+
+        current.reasons.forEach { reason ->
+            guardHealthRemedyText(reason)?.let { remedy ->
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(text = remedy, fontSize = 13.sp, color = textColor.copy(alpha = 0.8f))
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
+}
+
+@Composable
+private fun Boolean.asAvailability(): String =
+    if (this) stringResource(R.string.guard_health_available)
+    else stringResource(R.string.guard_health_unavailable)
