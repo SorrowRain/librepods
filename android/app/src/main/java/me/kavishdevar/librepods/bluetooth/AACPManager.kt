@@ -23,6 +23,7 @@ package me.kavishdevar.librepods.bluetooth
 import android.util.Log
 import me.kavishdevar.librepods.data.Capability
 import me.kavishdevar.librepods.data.CustomEq
+import me.kavishdevar.librepods.data.LocalHostIdentity
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -218,9 +219,11 @@ class AACPManager {
     var oldConnectedDevices: List<ConnectedDevice> = listOf()
         private set
 
+    @Volatile
     var connectedDevices: List<ConnectedDevice> = listOf()
         private set
 
+    @Volatile
     var audioSource: AudioSource? = null
         private set
 
@@ -958,6 +961,66 @@ class AACPManager {
         buffer.put(byteArrayOf(0x30, 0x64))
 
         return opcode + buffer.array()
+    }
+
+    /**
+     * Builds Apple's periodic Smart Routing Media Information report. This reports local
+     * playback state only; unlike the removed takeover path, it never requests ownership.
+     * Uses fixed separators matching historical format, not OPACK dynamic length encoding.
+     */
+    fun createMediaInformationPacket(
+        selfMacAddress: String,
+        targetMacAddress: String,
+        playingApp: String,
+        streamingState: Boolean = true,
+    ): ByteArray {
+        val opcode = byteArrayOf(Opcodes.SMART_ROUTING, 0x00)
+        val buffer = ByteBuffer.allocate(138)
+        val rawPlayingApp = playingApp.ifBlank { "NA" }
+        val playingAppBytes = rawPlayingApp.toByteArray().copyOf(22).apply {
+            for (i in rawPlayingApp.length until 22) this[i] = 0
+        }
+        val streamingStateBytes = (if (streamingState) "YES" else "NO").toByteArray()
+
+        buffer.put(
+            targetMacAddress.split(":").map { it.toInt(16).toByte() }.toByteArray().reversedArray()
+        )
+        buffer.put(byteArrayOf(0x82.toByte(), 0x00))
+        buffer.put(byteArrayOf(0x01, 0xE5.toByte(), 0x4A))
+        buffer.put("PlayingApp".toByteArray())
+        buffer.put(0x56)
+        buffer.put(playingAppBytes)
+        buffer.put(0x52)
+        buffer.put("HostStreamingState".toByteArray())
+        buffer.put(0x42)
+        buffer.put(streamingStateBytes)
+        buffer.put(0x49)
+        buffer.put("btAddress".toByteArray())
+        buffer.put(0x51)
+        buffer.put(selfMacAddress.toByteArray())
+        buffer.put(0x46)
+        buffer.put("btName".toByteArray())
+        buffer.put(0x47)
+        buffer.put("Android".toByteArray())
+        buffer.put(0x58)
+        buffer.put("otherDevice".toByteArray())
+        buffer.put("AudioCategory".toByteArray())
+        buffer.put(byteArrayOf(0x31, 0x2D, 0x01))
+
+        return opcode + buffer.array()
+    }
+
+    fun resolveSmartRoutingTarget(selfMacAddress: String): String? {
+        val selfAddress = LocalHostIdentity.normalize(selfMacAddress) ?: return null
+        return buildList {
+            audioSource
+                ?.takeUnless { it.type == AudioSourceType.NONE }
+                ?.mac
+                ?.let(::add)
+            connectedDevices.mapTo(this) { it.mac }
+        }.asSequence()
+            .mapNotNull(LocalHostIdentity::normalize)
+            .firstOrNull { it != selfAddress }
     }
 
     fun sendAddTiPiDevice(

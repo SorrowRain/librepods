@@ -48,6 +48,7 @@ import android.content.pm.PackageManager
 import android.content.res.Resources
 import android.graphics.Color
 import android.media.AudioManager
+import android.media.AudioPlaybackConfiguration
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Binder
@@ -174,6 +175,9 @@ private const val AUTOMATIC_RECONNECT_RETRY_DELAY_MS = 1_500L
 private const val PROFILE_REPAIR_INITIAL_DELAY_MS = 1_500L
 private const val PROFILE_REPAIR_RETRY_DELAY_MS = 4_000L
 private const val FRESH_IN_EAR_BLE_WINDOW_MS = 15_000L
+private const val MEDIA_INFORMATION_REPORT_INTERVAL_MS = 8_000L
+private const val UNKNOWN_PLAYING_APP = "NA"
+private const val PLAYER_STATE_STARTED = 2
 // Scheduling jitter is tens of milliseconds; anything past this means the process
 // was not running when it should have been.
 private const val GUARD_TICK_LATENESS_REPORT_MS = 750L
@@ -218,6 +222,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private val spatialHeadTrackerBridge = RootHeadTrackerBridge()
     private val rootAvrcpVolumeController by lazy { RootAvrcpVolumeController(this) }
     private val spatialAudioController by lazy { RootSpatialAudioController(this) }
+    private lateinit var audioManager: AudioManager
     private val audioFeatureScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val aacpReaderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val remoteDeviceGuardScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -261,6 +266,22 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private val connectionLifecycleLock = Any()
     private var aacpSessionJob: Job? = null
     private var aacpDelayedRefreshJob: Job? = null
+    @Volatile
+    private var mediaInformationReporterJob: Job? = null
+    private data class LocalAudioPlaybackState(
+        val playingApp: String = UNKNOWN_PLAYING_APP,
+        val streamingState: Boolean = false,
+    )
+    @Volatile
+    private var localAudioPlaybackState = LocalAudioPlaybackState()
+    private var audioPlaybackMonitorRegistered = false
+    private val audioPlaybackHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val audioPlaybackCallback = object : AudioManager.AudioPlaybackCallback() {
+        override fun onPlaybackConfigChanged(configs: MutableList<AudioPlaybackConfiguration>?) {
+            super.onPlaybackConfigChanged(configs)
+            refreshLocalAudioPlaybackState(configs.orEmpty())
+        }
+    }
     private val reconnectEpisodeGate = ReconnectEpisodeGate()
     private val reconnectLifecycleGate = ReconnectLifecycleGate()
     @Volatile
@@ -1048,6 +1069,93 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }
     }
 
+    private fun startAudioPlaybackMonitor() {
+        try {
+            audioManager.registerAudioPlaybackCallback(
+                audioPlaybackCallback,
+                audioPlaybackHandler,
+            )
+            audioPlaybackMonitorRegistered = true
+        } catch (error: Throwable) {
+            Log.w(TAG, "Could not register audio playback monitor", error)
+        }
+        refreshLocalAudioPlaybackState()
+    }
+
+    private fun stopAudioPlaybackMonitor() {
+        if (audioPlaybackMonitorRegistered) {
+            runCatching {
+                audioManager.unregisterAudioPlaybackCallback(audioPlaybackCallback)
+            }.onFailure { error ->
+                Log.w(TAG, "Could not unregister audio playback monitor", error)
+            }
+            audioPlaybackMonitorRegistered = false
+        }
+        if (::audioManager.isInitialized) {
+            audioPlaybackHandler.removeCallbacksAndMessages(null)
+        }
+        localAudioPlaybackState = LocalAudioPlaybackState()
+    }
+
+    private fun refreshLocalAudioPlaybackState(
+        fallbackConfigurations: Collection<AudioPlaybackConfiguration> = emptyList(),
+    ) {
+        if (!::audioManager.isInitialized) return
+        val configurations = try {
+            audioManager.activePlaybackConfigurations
+        } catch (error: Throwable) {
+            Log.w(TAG, "Could not read active playback configurations", error)
+            fallbackConfigurations
+        }
+        val activeConfigurations = configurations.filter { configuration ->
+            reflectedPlaybackInt(configuration, "getPlayerState", "mPlayerState")
+                ?.let { it == PLAYER_STATE_STARTED }
+                ?: true
+        }
+        val playingPackages = activeConfigurations.asSequence()
+            .mapNotNull { configuration ->
+                reflectedPlaybackInt(configuration, "getClientUid", "mClientUid")
+            }
+            .flatMap { uid -> packageManager.getPackagesForUid(uid).orEmpty().asSequence() }
+            .distinct()
+            .toList()
+        val previousState = localAudioPlaybackState
+        val playingApp = previousState.playingApp
+            .takeIf { it != UNKNOWN_PLAYING_APP && it in playingPackages }
+            ?: playingPackages.firstOrNull()
+            ?: UNKNOWN_PLAYING_APP
+        val newState = LocalAudioPlaybackState(
+            playingApp = playingApp,
+            streamingState = activeConfigurations.isNotEmpty(),
+        )
+        if (newState != previousState) {
+            Log.d(
+                TAG,
+                "Local audio state changed: streaming=${newState.streamingState}, " +
+                    "playingApp=${newState.playingApp}",
+            )
+            localAudioPlaybackState = newState
+        }
+    }
+
+    private fun reflectedPlaybackInt(
+        configuration: AudioPlaybackConfiguration,
+        methodName: String,
+        fieldName: String,
+    ): Int? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                configuration.javaClass.getMethod(methodName).invoke(configuration) as Int
+            }.getOrNull()?.let { return it }
+        }
+        return runCatching {
+            configuration.javaClass.getDeclaredField(fieldName).let { field ->
+                field.isAccessible = true
+                field.getInt(configuration)
+            }
+        }.getOrNull()
+    }
+
 
     @SuppressLint("MissingPermission", "UnspecifiedRegisterReceiverFlag", "HardwareIds")
     override fun onCreate() {
@@ -1242,12 +1350,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 externalBroadcastReceiver, externalBroadcastFilter
             )
         }
-        val audioManager = this@AirPodsService.getSystemService(AUDIO_SERVICE) as AudioManager
+        audioManager = this@AirPodsService.getSystemService(AUDIO_SERVICE) as AudioManager
         MediaController.initialize(
             audioManager, this@AirPodsService.getSharedPreferences(
                 "settings", MODE_PRIVATE
             )
         )
+        startAudioPlaybackMonitor()
         PhoneSoundRoutingController.initialize(this, audioManager)
         dispatchRemoteDeviceGuard(
             RemoteDeviceAudioGuardEvent.EnabledChanged(
@@ -3227,6 +3336,51 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         return START_STICKY
     }
 
+    private fun startMediaInformationReporter(lease: AacpSocketLease) {
+        stopMediaInformationReporter()
+        if (!BluetoothConnectionManager.isCurrent(lease)) return
+        // Smart Routing peers use this periodic report as status, not as an ownership request.
+        mediaInformationReporterJob = aacpReaderScope.launch {
+            while (true) {
+                if (!BluetoothConnectionManager.isCurrent(lease)) break
+                delay(MEDIA_INFORMATION_REPORT_INTERVAL_MS)
+                if (!BluetoothConnectionManager.isCurrent(lease)) break
+                reportMediaInformation(lease)
+            }
+        }
+    }
+
+    private fun stopMediaInformationReporter() {
+        mediaInformationReporterJob?.cancel()
+        mediaInformationReporterJob = null
+    }
+
+    private fun reportMediaInformation(lease: AacpSocketLease) {
+        val selfMacAddress = LocalHostIdentity.normalize(config.selfMacAddress)
+            ?: LocalHostIdentity.normalize(localMac)
+            ?: run {
+                Log.d(TAG, "Skipping Media Information report without a local MAC address")
+                return
+            }
+        val targetMacAddress = aacpManager.resolveSmartRoutingTarget(selfMacAddress) ?: run {
+            Log.d(TAG, "Skipping Media Information report without a remote Smart Routing host")
+            return
+        }
+        val playbackState = localAudioPlaybackState
+        val sent = aacpManager.sendDataPacket(
+            aacpManager.createMediaInformationPacket(
+                selfMacAddress = selfMacAddress,
+                targetMacAddress = targetMacAddress,
+                playingApp = playbackState.playingApp,
+                streamingState = playbackState.streamingState,
+            ),
+            lease,
+        )
+        if (!sent && BluetoothConnectionManager.isCurrent(lease)) {
+            Log.w(TAG, "Could not send periodic Smart Routing Media Information report")
+        }
+    }
+
     @Synchronized
     @SuppressLint("MissingPermission", "UnspecifiedRegisterReceiverFlag")
     fun connectToSocket(
@@ -3237,6 +3391,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     ) {
         if (connectionGuard?.invoke() == false || serviceShuttingDown) return
         if (BluetoothConnectionManager.aacpSocket?.isConnected == true) {
+            if (mediaInformationReporterJob?.isActive != true) {
+                BluetoothConnectionManager.currentAacpSocketLease()?.let {
+                    startMediaInformationReporter(it)
+                }
+            }
             dispatchRemoteDeviceGuard(
                 RemoteDeviceAudioGuardEvent.AacpConnected,
                 "existing AACP socket",
@@ -3289,6 +3448,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             }
                             aacpSessionJob?.cancel()
                             aacpDelayedRefreshJob?.cancel()
+                            stopMediaInformationReporter()
                             this@AirPodsService.device = device
                             socketGeneration =
                                 BluetoothConnectionManager.installAacpSocket(socket)
@@ -3463,6 +3623,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         AACPManager.Companion.ProximityKeyType.ENC_KEY.value).toByte(),
                     lease,
                 )
+                startMediaInformationReporter(lease)
                 aacpSessionJob = aacpReaderScope.launch {
                     fun startupSuperseded(): Boolean {
                         val superseded = connectionGuard?.invoke() == false ||
@@ -3642,6 +3803,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     }
 
     private fun clearAacpSessionState(reason: String) {
+        stopMediaInformationReporter()
         isAirPodsA2dpPlaying = false
         cancelPendingAirPodsAbsoluteVolumeResync("AACP $reason")
         rootAvrcpVolumeController.cancel()
@@ -3915,6 +4077,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         synchronized(connectionLifecycleLock) {
             aacpSessionJob?.cancel()
             aacpDelayedRefreshJob?.cancel()
+            stopMediaInformationReporter()
             val currentLease = BluetoothConnectionManager.currentAacpSocketLease()
             BluetoothConnectionManager.invalidateAacpSocket()
             BluetoothConnectionManager.invalidateAttSocket()
@@ -3923,6 +4086,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             aacpManager.disconnected(currentLease)
         }
         aacpReaderScope.cancel()
+        stopAudioPlaybackMonitor()
         ServiceManager.setService(null)
 
         sharedPreferences.unregisterOnSharedPreferenceChangeListener(this)
