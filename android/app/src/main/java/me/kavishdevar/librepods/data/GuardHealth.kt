@@ -43,6 +43,8 @@ data class GuardHealth(
     val reasons: List<GuardHealthReason> = emptyList(),
     val barrierState: String = "not_initialized",
     val barrierActive: Boolean = false,
+    /** False means already-playing media stalls instead of moving to the speaker. */
+    val preferredRouteApplied: Boolean = false,
     val nativeLeaseAvailable: Boolean = false,
     val localMacResolved: Boolean = false,
     val aacpConnected: Boolean = false,
@@ -80,6 +82,7 @@ data class GuardHealth(
             localMacResolved: Boolean,
             aacpConnected: Boolean,
             guardState: RemoteDeviceAudioGuardState,
+            preferredRouteApplied: Boolean = false,
         ): GuardHealth {
             val reasons = mutableListOf<GuardHealthReason>()
             if (!enabled) {
@@ -89,6 +92,7 @@ data class GuardHealth(
                     reasons = reasons,
                     barrierState = barrierState,
                     barrierActive = barrierActive,
+                    preferredRouteApplied = preferredRouteApplied,
                     nativeLeaseAvailable = nativeLeaseAvailable,
                     localMacResolved = localMacResolved,
                     aacpConnected = aacpConnected,
@@ -114,6 +118,7 @@ data class GuardHealth(
                 reasons = reasons,
                 barrierState = barrierState,
                 barrierActive = barrierActive,
+                preferredRouteApplied = preferredRouteApplied,
                 nativeLeaseAvailable = nativeLeaseAvailable,
                 localMacResolved = localMacResolved,
                 aacpConnected = aacpConnected,

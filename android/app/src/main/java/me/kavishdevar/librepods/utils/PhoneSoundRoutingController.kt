@@ -15,6 +15,12 @@ data class PhoneSoundRoutingStatus(
     val active: Boolean = false,
     val state: String = "not_initialized",
     val lastError: String? = null,
+    /**
+     * Whether the preferred-device override is in place. The AudioPolicy mix alone only
+     * matches at track creation, so without this an already-playing app keeps its stream
+     * on the AirPods and simply goes silent once A2DP START is blocked.
+     */
+    val preferredRouteApplied: Boolean = false,
 )
 
 /** Routes non-call playback to the built-in speaker while another device owns AirPods audio. */
@@ -25,6 +31,14 @@ object PhoneSoundRoutingController {
     private const val ROUTE_FLAG_RENDER = 1
     private const val REGISTER_SUCCESS = 0
     private const val POLICY_STATUS_REGISTERED = 2
+    private const val AUDIO_DEVICE_ROLE_OUTPUT = 2
+    private const val ROUTING_STATE_PREFS = "phone_sound_routing"
+    /**
+     * Set before the preferred-device override is applied. AudioService does not
+     * necessarily drop the override when this process dies, which would leave media
+     * pinned to the speaker; the next service start reads this and clears it.
+     */
+    private const val KEY_PREFERRED_ROUTE_APPLIED = "preferred_route_applied"
 
     private val guardedUsages = setOf(
         AudioAttributes.USAGE_UNKNOWN,
@@ -46,6 +60,7 @@ object PhoneSoundRoutingController {
     private lateinit var appContext: Context
     private lateinit var audioManager: AudioManager
     private var registeredPolicy: Any? = null
+    private var preferredRouteStrategies: List<Any> = emptyList()
     private val retryHandler = Handler(Looper.getMainLooper())
     private var unregisterRetryCount = 0
     private var desiredEnabled = false
@@ -67,9 +82,18 @@ object PhoneSoundRoutingController {
         desiredEnabled = false
         appContext = context.applicationContext
         audioManager = manager
+        recoverLeakedPreferredRoute()
         if (registeredPolicy == null) {
             status = PhoneSoundRoutingStatus(initialized = true, state = "idle")
         }
+    }
+
+    /** Drops a preferred-device override left behind by a previous process. */
+    private fun recoverLeakedPreferredRoute() {
+        val prefs = appContext.getSharedPreferences(ROUTING_STATE_PREFS, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(KEY_PREFERRED_ROUTE_APPLIED, false)) return
+        Log.w(TAG, "Clearing a preferred speaker route left over from a previous run")
+        clearPreferredSpeakerRoute()
     }
 
     @Synchronized
@@ -108,7 +132,13 @@ object PhoneSoundRoutingController {
         runCatching { buildAndRegisterPolicy(speaker) }
             .onSuccess { policy ->
                 registeredPolicy = policy
-                status = PhoneSoundRoutingStatus(true, true, "registered")
+                val preferredRouteApplied = applyPreferredSpeakerRoute()
+                status = PhoneSoundRoutingStatus(
+                    initialized = true,
+                    active = true,
+                    state = "registered",
+                    preferredRouteApplied = preferredRouteApplied,
+                )
                 Log.i(TAG, "Speaker barrier registered: $reason")
             }
             .onFailure { rawError ->
@@ -135,6 +165,119 @@ object PhoneSoundRoutingController {
         desiredEnabled = false
         if (unregisterPolicy("shutdown")) {
             status = PhoneSoundRoutingStatus()
+        }
+    }
+
+    /**
+     * Pins the product strategies behind [guardedUsages] to the built-in speaker. Unlike the
+     * AudioPolicy mix this re-evaluates streams that are already running, which is what makes
+     * a long-lived media track leave the AirPods instead of stalling on a blocked A2DP output.
+     * Best effort: any failure leaves the mix as the only mechanism.
+     */
+    private fun applyPreferredSpeakerRoute(): Boolean {
+        val applied = runCatching {
+            val strategyClass = Class.forName("android.media.audiopolicy.AudioProductStrategy")
+            val strategies = strategyClass
+                .getMethod("getAudioProductStrategies")
+                .invoke(null) as? List<*> ?: return@runCatching false
+            val supportsAttributes = strategyClass.getMethod(
+                "supportsAudioAttributes",
+                AudioAttributes::class.java,
+            )
+            val speakerAttributes = Class.forName("android.media.AudioDeviceAttributes")
+                .getConstructor(
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    String::class.java,
+                )
+                .newInstance(
+                    AUDIO_DEVICE_ROLE_OUTPUT,
+                    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+                    "",
+                )
+            val setPreferredDevice = AudioManager::class.java.getMethod(
+                "setPreferredDeviceForStrategy",
+                strategyClass,
+                Class.forName("android.media.AudioDeviceAttributes"),
+            )
+
+            val targets = strategies.filterNotNull().filter { strategy ->
+                guardedUsages.any { usage ->
+                    supportsAttributes.invoke(
+                        strategy,
+                        AudioAttributes.Builder().setUsage(usage).build(),
+                    ) == true
+                }
+            }
+            if (targets.isEmpty()) return@runCatching false
+
+            markPreferredRouteApplied(true)
+            var anyApplied = false
+            targets.forEach { strategy ->
+                runCatching { setPreferredDevice.invoke(audioManager, strategy, speakerAttributes) }
+                    .onSuccess { anyApplied = true }
+                    .onFailure { error ->
+                        Log.w(TAG, "Preferred speaker route rejected for one strategy", unwrap(error))
+                    }
+            }
+            preferredRouteStrategies = if (anyApplied) targets else emptyList()
+            if (!anyApplied) markPreferredRouteApplied(false)
+            anyApplied
+        }.getOrElse { error ->
+            // Hidden API missing or renamed on this ROM: keep the mix and carry on.
+            Log.w(TAG, "Preferred speaker route unavailable", unwrap(error))
+            markPreferredRouteApplied(false)
+            false
+        }
+        if (applied) Log.i(TAG, "Preferred speaker route applied to ${preferredRouteStrategies.size} strategies")
+        return applied
+    }
+
+    private fun clearPreferredSpeakerRoute() {
+        runCatching {
+            val strategyClass = Class.forName("android.media.audiopolicy.AudioProductStrategy")
+            val removePreferredDevice = AudioManager::class.java.getMethod(
+                "removePreferredDeviceForStrategy",
+                strategyClass,
+            )
+            val targets = preferredRouteStrategies.ifEmpty {
+                // Recovery path: the strategies from the previous process are unknown, so
+                // clear every strategy that could have been pinned.
+                val supportsAttributes = strategyClass.getMethod(
+                    "supportsAudioAttributes",
+                    AudioAttributes::class.java,
+                )
+                (strategyClass.getMethod("getAudioProductStrategies").invoke(null) as? List<*>)
+                    ?.filterNotNull()
+                    ?.filter { strategy ->
+                        guardedUsages.any { usage ->
+                            supportsAttributes.invoke(
+                                strategy,
+                                AudioAttributes.Builder().setUsage(usage).build(),
+                            ) == true
+                        }
+                    }
+                    .orEmpty()
+            }
+            targets.forEach { strategy ->
+                runCatching { removePreferredDevice.invoke(audioManager, strategy) }
+                    .onFailure { error ->
+                        Log.w(TAG, "Could not clear preferred speaker route", unwrap(error))
+                    }
+            }
+        }.onFailure { error ->
+            Log.w(TAG, "Preferred speaker route could not be cleared", unwrap(error))
+        }
+        preferredRouteStrategies = emptyList()
+        markPreferredRouteApplied(false)
+    }
+
+    private fun markPreferredRouteApplied(applied: Boolean) {
+        runCatching {
+            appContext.getSharedPreferences(ROUTING_STATE_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_PREFERRED_ROUTE_APPLIED, applied)
+                .commit()
         }
     }
 
@@ -194,6 +337,10 @@ object PhoneSoundRoutingController {
     }
 
     private fun unregisterPolicy(reason: String): Boolean {
+        // Always first: leaving the override in place would keep media on the speaker even
+        // after the guard has released everything else.
+        clearPreferredSpeakerRoute()
+
         val policy = registeredPolicy
         if (policy == null) {
             status = PhoneSoundRoutingStatus(initialized = true, state = "idle")
@@ -213,6 +360,7 @@ object PhoneSoundRoutingController {
                 active = true,
                 state = "unregistration_failed",
                 lastError = message,
+                preferredRouteApplied = false,
             )
             Log.e(TAG, "Speaker barrier unregister failed: $reason", error)
             scheduleUnregisterRetry(policy, reason)

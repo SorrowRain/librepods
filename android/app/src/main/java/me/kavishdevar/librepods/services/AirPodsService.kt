@@ -989,6 +989,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             localMacResolved = localMac.isNotEmpty(),
             aacpConnected = snapshot.aacpConnected,
             guardState = snapshot.state,
+            preferredRouteApplied = barrierStatus.preferredRouteApplied,
         )
         if (_guardHealth.value == health) return
         val levelChanged = _guardHealth.value.level != health.level ||

@@ -984,6 +984,8 @@ private fun GuardHealthCard(
 
         listOf(
             stringResource(R.string.guard_health_barrier) to current.barrierState,
+            stringResource(R.string.guard_health_preferred_route) to
+                current.preferredRouteApplied.asAvailability(),
             stringResource(R.string.guard_health_native_lease) to
                 current.nativeLeaseAvailable.asAvailability(),
             stringResource(R.string.guard_health_local_mac) to

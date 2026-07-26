@@ -160,6 +160,7 @@
     <string name="guard_health_status_disabled">Off</string>
     <string name="guard_health_title">Protection health</string>
     <string name="guard_health_barrier">Speaker routing policy</string>
+    <string name="guard_health_preferred_route">Speaker override for playing media</string>
     <string name="guard_health_native_lease">Xposed A2DP block</string>
     <string name="guard_health_local_mac">Phone Bluetooth address</string>
     <string name="guard_health_aacp">AirPods control link</string>
