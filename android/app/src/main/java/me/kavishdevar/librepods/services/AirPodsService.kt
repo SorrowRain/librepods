@@ -251,6 +251,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private var loggedMissingNativeGuardTransport = false
     private var loggedUngatedNativeLease = false
     @Volatile
+    private var audioProfileRepairDeferred = false
+    @Volatile
     private var serviceShuttingDown = false
     @Volatile
     private var pendingAacpSocket: BluetoothSocket? = null
@@ -620,6 +622,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 if (socketConnected && ensureAudioProfiles &&
                     isAutomaticReconnectAllowed(lifecycleToken, reconnectEpisodeGeneration)
                 ) {
+                    // The control channel is always worth restoring — it is how we learn who
+                    // owns the audio. The audio profiles are not, while someone else has it.
                     requestBoundedAudioProfileRepair(
                         reason = "aacp_reconnected:$reason",
                         target = target,
@@ -694,6 +698,17 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             (status.isLeftInEar || status.isRightInEar)
     }
 
+    /**
+     * True while the AirPods report another host as their audio source. Connecting our own
+     * audio profiles then would take the AirPods away from that host — the exact thing the
+     * guard exists to prevent, except initiated by us instead of by the OS.
+     */
+    private fun remoteHostOwnsAudio(): Boolean {
+        val state = remoteDeviceAudioGuard.snapshot.state
+        return state == RemoteDeviceAudioGuardState.REMOTE_ACTIVE ||
+            state == RemoteDeviceAudioGuardState.REMOTE_GRACE
+    }
+
     private fun requestBoundedAudioProfileRepair(
         reason: String,
         target: BluetoothDevice?,
@@ -702,6 +717,14 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         val lifecycleToken = reconnectLifecycleGate.currentToken()
         if (target == null || lifecycleToken == null || isAirPodsA2dpConnected ||
             !hasFreshInEarBlePresence()) {
+            return
+        }
+        if (remoteHostOwnsAudio()) {
+            Log.i(
+                TAG,
+                "Deferring audio profile repair while another device owns the AirPods: $reason"
+            )
+            audioProfileRepairDeferred = true
             return
         }
         if (BluetoothConnectionManager.aacpSocket?.isConnected != true) {
@@ -947,6 +970,19 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         automaticMediaResumeAllowed = !transition.current.enabled ||
             transition.current.state == RemoteDeviceAudioGuardState.IDLE ||
             transition.current.state == RemoteDeviceAudioGuardState.LOCAL
+
+        // A repair we skipped because another host owned the AirPods has to be retried once
+        // they let go, otherwise the phone would sit without its audio profiles.
+        if (audioProfileRepairDeferred && !remoteHostOwnsAudio()) {
+            audioProfileRepairDeferred = false
+            if (!isAirPodsA2dpConnected) {
+                requestBoundedAudioProfileRepair(
+                    reason = "remote_released",
+                    target = resolveSavedAirPodsDevice(),
+                    delayMs = 0L,
+                )
+            }
+        }
 
         refreshGuardHealth()
 
