@@ -64,8 +64,10 @@ internal class ReconnectEpisodeGate(
     }
 
     @Synchronized
-    fun finishProfileRepair(permit: ProfileRepairPermit) {
-        if (permit.generation == generation) profileRepairInFlight = false
+    fun finishProfileRepair(permit: ProfileRepairPermit, succeeded: Boolean = false) {
+        if (permit.generation != generation) return
+        profileRepairInFlight = false
+        if (succeeded && profileRepairAttempts > 0) profileRepairAttempts--
     }
 
     @Synchronized
@@ -79,8 +81,12 @@ internal class ReconnectEpisodeGate(
     }
 
     @Synchronized
-    fun finishControlReconnect(permit: ControlReconnectPermit) {
-        if (permit.generation == generation) controlReconnectInFlight = false
+    fun finishControlReconnect(permit: ControlReconnectPermit, succeeded: Boolean = false) {
+        if (permit.generation != generation) return
+        controlReconnectInFlight = false
+        // Successful attempts hand their permit back: the budget bounds futile retry
+        // storms, not the number of clean recoveries in a long wear session.
+        if (succeeded && controlReconnectAttempts > 0) controlReconnectAttempts--
     }
 
     @Synchronized
