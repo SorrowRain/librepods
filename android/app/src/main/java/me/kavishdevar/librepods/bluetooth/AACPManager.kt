@@ -590,12 +590,27 @@ class AACPManager {
             }
 
             Opcodes.CONNECTED_DEVICES -> {
+                val parsedDevices = try {
+                    parseConnectedDevicesResponse(packet)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error parsing connected devices response: ${e.message}")
+                    return
+                }
                 oldConnectedDevices = connectedDevices
-                connectedDevices = parseConnectedDevicesResponse(packet)
+                connectedDevices = parsedDevices
                 callback?.onConnectedDevicesReceived(connectedDevices, expectedLease)
             }
 
             Opcodes.SMART_ROUTING_RESP -> {
+                if (packet.size < 12) {
+                    Log.w(
+                        TAG, "Received SMART_ROUTING_RESP packet too short: ${
+                        packet.joinToString(" ") {
+                            "%02X".format(it)
+                        }
+                    }")
+                    return
+                }
                 val packetString = packet.decodeToString()
                 val sender =
                     packet.sliceArray(6..11).reversedArray().joinToString(":") { "%02X".format(it) }
@@ -622,13 +637,14 @@ class AACPManager {
                     TAG,
                     "Smart Routing Response from $sender: $packetString, type: ${connectedDevices.find { it.mac == sender }?.type}"
                 )
-                if (packetString.contains("hostStreamingState", ignoreCase = true)) {
-                    when {
-                        packetString.contains("YES", ignoreCase = true) ->
-                            callback?.onRemoteStreamingStateChanged(sender, true, expectedLease)
-                        packetString.contains("NO", ignoreCase = true) ->
-                            callback?.onRemoteStreamingStateChanged(sender, false, expectedLease)
-                    }
+                when (AacpSmartRoutingParser.parseHostStreamingState(packetString)) {
+                    HostStreamingState.STREAMING ->
+                        callback?.onRemoteStreamingStateChanged(sender, true, expectedLease)
+                    HostStreamingState.NOT_STREAMING ->
+                        callback?.onRemoteStreamingStateChanged(sender, false, expectedLease)
+                    HostStreamingState.UNRECOGNIZED ->
+                        Log.w(TAG, "Unrecognized hostStreamingState value from $sender")
+                    HostStreamingState.ABSENT -> Unit
                 }
                 if (packetString.contains("SetOwnershipToFalse")) {
                     callback?.onOwnershipToFalseRequest(

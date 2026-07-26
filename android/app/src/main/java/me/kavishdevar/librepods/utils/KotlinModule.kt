@@ -150,7 +150,8 @@ class KotlinModule: XposedModule() {
                 }
             }
         } catch (e: Throwable) {
-            runCatching { NativeBridge.setA2dpStartGuardLease(0L) }
+            // Keep the last applied lease: clearing on a transient read error would drop
+            // an active protection window; native-side expiry bounds any staleness.
             log(Log.ERROR, TAG, "Failed to update A2DP START guard lease: ${e.message}")
         }
     }
