@@ -174,6 +174,9 @@ private const val AUTOMATIC_RECONNECT_RETRY_DELAY_MS = 1_500L
 private const val PROFILE_REPAIR_INITIAL_DELAY_MS = 1_500L
 private const val PROFILE_REPAIR_RETRY_DELAY_MS = 4_000L
 private const val FRESH_IN_EAR_BLE_WINDOW_MS = 15_000L
+// Scheduling jitter is tens of milliseconds; anything past this means the process
+// was not running when it should have been.
+private const val GUARD_TICK_LATENESS_REPORT_MS = 750L
 private const val MIUI_FOLD_TIMEOUT_EXTRA = "miui.fold.timeout"
 private const val MIUI_FOLD_TIMEOUT_MS = 1_000L
 
@@ -240,9 +243,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private val remoteDeviceGuardHandler by lazy { Handler(Looper.getMainLooper()) }
     private val remoteDeviceRemotePreferences by lazy { XposedRemotePrefProvider.create() }
     private val remoteDeviceGuardTick = Runnable {
+        reportGuardTickLateness()
         dispatchRemoteDeviceGuard(RemoteDeviceAudioGuardEvent.Tick, "deadline")
     }
+    @Volatile
+    private var guardTickDueAtMs = 0L
     private var loggedMissingNativeGuardTransport = false
+    private var loggedUngatedNativeLease = false
     @Volatile
     private var serviceShuttingDown = false
     @Volatile
@@ -831,6 +838,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             }
 
             remoteDeviceGuardHandler.removeCallbacks(remoteDeviceGuardTick)
+            guardTickDueAtMs = transition.nextDeadlineMs ?: 0L
             transition.nextDeadlineMs?.let { deadlineMs ->
                 remoteDeviceGuardHandler.postDelayed(
                     remoteDeviceGuardTick,
@@ -838,10 +846,37 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 )
             }
 
-            transition.actions.forEach { action ->
+            // Blocking A2DP START without a working speaker barrier does not move audio to
+            // the speaker — it leaves the stream with nowhere to go and the phone goes
+            // silent. So the native block must always be a strict subset of "barrier is
+            // registered": establish or drop the barrier first, arm the block last, and
+            // clear the block before the barrier goes away.
+            transition.actions.sortedBy { action ->
+                when (action) {
+                    RemoteDeviceAudioGuardAction.ClearNativeLease -> 0
+                    RemoteDeviceAudioGuardAction.EnableBarrier -> 1
+                    RemoteDeviceAudioGuardAction.DisableBarrier -> 2
+                    is RemoteDeviceAudioGuardAction.RefreshNativeLease -> 3
+                    RemoteDeviceAudioGuardAction.RequestAudioSource -> 4
+                }
+            }.forEach { action ->
                 if (serviceShuttingDown) return@forEach
                 when (action) {
                     is RemoteDeviceAudioGuardAction.RefreshNativeLease -> {
+                        if (!PhoneSoundRoutingController.status.active) {
+                            if (!loggedUngatedNativeLease) {
+                                loggedUngatedNativeLease = true
+                                Log.w(
+                                    TAG,
+                                    "Not arming the A2DP START block: speaker barrier is " +
+                                        "${PhoneSoundRoutingController.status.state}; blocking " +
+                                        "without it would silence the phone instead of " +
+                                        "routing to the speaker"
+                                )
+                            }
+                            return@forEach
+                        }
+                        loggedUngatedNativeLease = false
                         runCatching {
                             if (remoteDeviceRemotePreferences.isAvailable()) {
                                 remoteDeviceRemotePreferences.setA2dpStartGuardLease(action.durationMs)
@@ -921,6 +956,23 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             }
             runCatching { remoteDeviceRemotePreferences.setA2dpStartGuardLease(0L) }
         }
+    }
+
+    /**
+     * A frozen process still has its clocks advance, so an overdue deadline fires the
+     * instant it is thawed. Reporting how late the tick was is the only way to see a
+     * freeze after the fact — nothing can be logged while it is happening.
+     */
+    private fun reportGuardTickLateness() {
+        val dueAt = guardTickDueAtMs
+        if (dueAt <= 0L) return
+        val latenessMs = SystemClock.elapsedRealtime() - dueAt
+        if (latenessMs < GUARD_TICK_LATENESS_REPORT_MS) return
+        Log.w(
+            TAG,
+            "Remote-device guard tick ran ${latenessMs}ms late; the process was most " +
+                "likely frozen or starved, and the A2DP START block may have lapsed"
+        )
     }
 
     private fun refreshGuardHealth() {

@@ -36,6 +36,7 @@ extern "C" {
 
 #define LOG_TAG "LibrePodsHook"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 static HookFunType hook_func = nullptr;
@@ -53,8 +54,11 @@ static std::atomic<bool> a2dpStartHookInstalled(false);
 
 static constexpr char A2DP_START_STREAM_SYMBOL[] =
         "_ZNK19A2dpStreamCallbacks11StartStreamEb";
+static constexpr int32_t A2DP_CTRL_ACK_SUCCESS = 0;
 static constexpr int32_t A2DP_CTRL_ACK_FAILURE = 3;
 static constexpr int64_t MAX_A2DP_START_GUARD_LEASE_MS = 10'000;
+// How long after a lease expires a start attempt is still worth reporting as a lapse.
+static constexpr int64_t LAPSED_LEASE_REPORT_WINDOW_MS = 60'000;
 static constexpr int64_t NANOS_PER_MILLISECOND = 1'000'000;
 static constexpr int64_t NANOS_PER_SECOND = 1'000'000'000;
 
@@ -82,9 +86,26 @@ int32_t fake_A2dpStreamCallbacks_StartStream(const void *self, bool lowLatency) 
         return A2DP_CTRL_ACK_FAILURE;
     }
 
+    // A start that arrives just after the lease ran out is the signature of the app being
+    // unable to renew (HyperOS froze it). Without this the fail-open path is completely
+    // silent and the guard's most important failure is invisible in a bug report.
+    const int64_t expiryNs = a2dpStartGuardExpiryNs.load(std::memory_order_relaxed);
+    if (expiryNs > 0) {
+        const int64_t nowNs = monotonicTimeNs();
+        if (nowNs > 0) {
+            const int64_t lapsedMs = (nowNs - expiryNs) / NANOS_PER_MILLISECOND;
+            if (lapsedMs >= 0 && lapsedMs <= LAPSED_LEASE_REPORT_WINDOW_MS) {
+                LOGW("A2DP StartStream allowed %lldms after the guard lease lapsed; "
+                     "the app could not renew it",
+                     (long long) lapsedMs);
+            }
+        }
+    }
+
     if (!original_A2dpStreamCallbacks_StartStream) {
-        LOGE("A2DP StartStream original function unavailable");
-        return A2DP_CTRL_ACK_FAILURE;
+        // Fail open: a missing original must never leave A2DP permanently broken.
+        LOGE("A2DP StartStream original function unavailable; allowing the stream");
+        return A2DP_CTRL_ACK_SUCCESS;
     }
     return original_A2dpStreamCallbacks_StartStream(self, lowLatency);
 }
