@@ -100,6 +100,7 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.bluetooth.AACPManager
 import me.kavishdevar.librepods.bluetooth.AACPManager.Companion.StemPressType
 import me.kavishdevar.librepods.bluetooth.AacpSocketLease
+import me.kavishdevar.librepods.bluetooth.AudioProfileRepairFence
 import me.kavishdevar.librepods.bluetooth.ATTHandles
 import me.kavishdevar.librepods.bluetooth.ATTManagerv2
 import me.kavishdevar.librepods.bluetooth.BLEManager
@@ -125,6 +126,7 @@ import me.kavishdevar.librepods.data.RemoteDeviceAudioGuard
 import me.kavishdevar.librepods.data.RemoteDeviceAudioGuardAction
 import me.kavishdevar.librepods.data.RemoteDeviceAudioGuardEvent
 import me.kavishdevar.librepods.data.RemoteDeviceAudioGuardState
+import me.kavishdevar.librepods.data.RemoteDeviceAudioGuardTransition
 import me.kavishdevar.librepods.data.RemoteDeviceAudioSourceType
 import me.kavishdevar.librepods.data.StemAction
 import me.kavishdevar.librepods.data.XposedRemotePrefProvider
@@ -175,6 +177,7 @@ private const val AUTOMATIC_RECONNECT_RETRY_DELAY_MS = 1_500L
 private const val PROFILE_REPAIR_INITIAL_DELAY_MS = 1_500L
 private const val PROFILE_REPAIR_RETRY_DELAY_MS = 4_000L
 private const val FRESH_IN_EAR_BLE_WINDOW_MS = 15_000L
+private const val PERIODIC_SMART_ROUTING_MEDIA_REPORTING_ENABLED = false
 private const val MEDIA_INFORMATION_REPORT_INTERVAL_MS = 8_000L
 private const val UNKNOWN_PLAYING_APP = "NA"
 private const val PLAYER_STATE_STARTED = 2
@@ -238,11 +241,17 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         val event: RemoteDeviceAudioGuardEvent,
         val reason: String,
         val expectedLease: AacpSocketLease?,
+        val pendingProfileRepairProtection: Boolean,
     )
     private val remoteDeviceGuardEvents = Channel<RemoteDeviceGuardMessage>(Channel.UNLIMITED)
     private val remoteDeviceGuardConsumer = remoteDeviceGuardScope.launch {
         for (message in remoteDeviceGuardEvents) {
-            processRemoteDeviceGuard(message.event, message.reason, message.expectedLease)
+            processRemoteDeviceGuard(
+                message.event,
+                message.reason,
+                message.expectedLease,
+                message.pendingProfileRepairProtection,
+            )
         }
     }
     private val remoteDeviceGuardHandler by lazy { Handler(Looper.getMainLooper()) }
@@ -284,6 +293,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     }
     private val reconnectEpisodeGate = ReconnectEpisodeGate()
     private val reconnectLifecycleGate = ReconnectLifecycleGate()
+    private val audioProfileRepairFence = AudioProfileRepairFence()
     @Volatile
     private var isAirPodsA2dpConnected = false
     private var isAirPodsA2dpPlaying = false
@@ -720,19 +730,55 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     }
 
     /**
-     * True while the AirPods report another host as their audio source. Connecting our own
-     * audio profiles then would take the AirPods away from that host — the exact thing the
-     * guard exists to prevent, except initiated by us instead of by the OS.
+     * True while remote audio is reported or still unresolved, including evidence queued for
+     * the guard consumer. Connecting our own profiles then could take the AirPods away from the
+     * other host — the exact thing the guard exists to prevent, except initiated by us.
      */
     private fun remoteHostOwnsAudio(): Boolean {
         val state = remoteDeviceAudioGuard.snapshot.state
-        return state == RemoteDeviceAudioGuardState.REMOTE_ACTIVE ||
+        return audioProfileRepairFence.isProtected ||
+            state == RemoteDeviceAudioGuardState.REMOTE_ACTIVE ||
             state == RemoteDeviceAudioGuardState.REMOTE_GRACE ||
             // Ownership is still unknown here and the barrier is already up, so grabbing the
             // audio profiles now would contradict the protection we are applying. The probe
             // resolves in well under two seconds and the repair runs then.
             state == RemoteDeviceAudioGuardState.PROBING
     }
+
+    private fun protectAgainstAutomaticAudioProfileRepair(reason: String) {
+        val newlyProtected = audioProfileRepairFence.protect()
+        audioProfileRepairDeferred = true
+        if (newlyProtected) {
+            Log.i(TAG, "Fencing automatic audio profile repair: $reason")
+        }
+    }
+
+    private fun shouldProtectBeforeGuardDispatch(event: RemoteDeviceAudioGuardEvent): Boolean =
+        when (event) {
+            RemoteDeviceAudioGuardEvent.AacpConnected -> true
+            RemoteDeviceAudioGuardEvent.AacpDisconnected ->
+                remoteDeviceAudioGuard.snapshot.barrierEnabled
+            is RemoteDeviceAudioGuardEvent.EnabledChanged ->
+                event.enabled && remoteDeviceAudioGuard.snapshot.aacpConnected
+            is RemoteDeviceAudioGuardEvent.AudioSourceObserved -> when (event.type) {
+                RemoteDeviceAudioSourceType.NONE -> false
+                RemoteDeviceAudioSourceType.CALL,
+                RemoteDeviceAudioSourceType.MEDIA,
+                RemoteDeviceAudioSourceType.ACTIVE_UNKNOWN,
+                RemoteDeviceAudioSourceType.UNKNOWN,
+                -> {
+                    val local = LocalHostIdentity.normalize(event.localMac)
+                    val source = LocalHostIdentity.normalize(event.sourceMac)
+                    local == null || source == null || local != source
+                }
+            }
+            is RemoteDeviceAudioGuardEvent.RemoteStreamingChanged -> {
+                val local = LocalHostIdentity.normalize(event.localMac)
+                val source = LocalHostIdentity.normalize(event.sourceMac)
+                event.isStreaming && local != null && source != null && local != source
+            }
+            RemoteDeviceAudioGuardEvent.Tick -> false
+        }
 
     private fun requestBoundedAudioProfileRepair(
         reason: String,
@@ -772,10 +818,14 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             try {
                 if (delayMs > 0L) delay(delayMs)
                 if (isAirPodsA2dpConnected ||
+                    remoteHostOwnsAudio() ||
                     !isAutomaticReconnectAllowed(lifecycleToken, permit.generation) ||
                     !hasFreshInEarBlePresence() ||
                     BluetoothConnectionManager.aacpSocket?.isConnected != true
                 ) {
+                    if (remoteHostOwnsAudio()) {
+                        audioProfileRepairDeferred = true
+                    }
                     if (BluetoothConnectionManager.aacpSocket?.isConnected != true) {
                         requestAutomaticReconnect(
                             "profile_repair_control:$reason",
@@ -790,7 +840,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     this@AirPodsService,
                     target,
                     requestGuard = {
-                        isAutomaticReconnectAllowed(lifecycleToken, permit.generation) &&
+                        !remoteHostOwnsAudio() &&
+                            isAutomaticReconnectAllowed(lifecycleToken, permit.generation) &&
                             hasFreshInEarBlePresence() &&
                             BluetoothConnectionManager.aacpSocket?.isConnected == true
                     },
@@ -849,6 +900,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         expectedLease: AacpSocketLease? = null,
     ) {
         if (serviceShuttingDown) return
+        val pendingProfileRepairProtection = shouldProtectBeforeGuardDispatch(event)
+        if (pendingProfileRepairProtection) {
+            audioProfileRepairFence.beginPendingProtection()
+            audioProfileRepairDeferred = true
+        }
         if (event == RemoteDeviceAudioGuardEvent.AacpConnected ||
             event == RemoteDeviceAudioGuardEvent.AacpDisconnected ||
             event is RemoteDeviceAudioGuardEvent.EnabledChanged && event.enabled
@@ -856,10 +912,19 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             automaticMediaResumeAllowed = false
         }
         val result = remoteDeviceGuardEvents.trySend(
-            RemoteDeviceGuardMessage(event, reason, expectedLease)
+            RemoteDeviceGuardMessage(
+                event,
+                reason,
+                expectedLease,
+                pendingProfileRepairProtection,
+            )
         )
         if (result.isFailure && !serviceShuttingDown) {
             Log.e(TAG, "Could not enqueue remote-audio guard event: $event")
+        }
+        if (result.isFailure && pendingProfileRepairProtection) {
+            val protectionReleased = audioProfileRepairFence.finishPendingProtection()
+            if (protectionReleased) drainDeferredAudioProfileRepair()
         }
     }
 
@@ -867,14 +932,30 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         event: RemoteDeviceAudioGuardEvent,
         reason: String,
         expectedLease: AacpSocketLease?,
+        pendingProfileRepairProtection: Boolean,
     ) {
-        if (serviceShuttingDown) return
-        if (expectedLease != null && !BluetoothConnectionManager.isCurrent(expectedLease)) {
-            Log.d(TAG, "Ignoring stale remote-audio guard event: $reason")
+        if (serviceShuttingDown) {
+            if (pendingProfileRepairProtection) {
+                audioProfileRepairFence.finishPendingProtection()
+            }
             return
         }
-        val now = SystemClock.elapsedRealtime()
-        val transition = remoteDeviceAudioGuard.dispatch(event, now)
+        if (expectedLease != null && !BluetoothConnectionManager.isCurrent(expectedLease)) {
+            Log.d(TAG, "Ignoring stale remote-audio guard event: $reason")
+            if (pendingProfileRepairProtection) {
+                audioProfileRepairFence.finishPendingProtection()
+            }
+            drainDeferredAudioProfileRepair()
+            return
+        }
+        val transition: RemoteDeviceAudioGuardTransition = try {
+            val now = SystemClock.elapsedRealtime()
+            val transition = remoteDeviceAudioGuard.dispatch(event, now)
+            if (transition.current.barrierEnabled) {
+                protectAgainstAutomaticAudioProfileRepair(
+                    "guard ${transition.current.state}: $reason"
+                )
+            }
             if (transition.previous.state != transition.current.state ||
                 transition.actions.isNotEmpty()
             ) {
@@ -992,22 +1073,23 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 }
             }
 
+            if (!transition.current.barrierEnabled) {
+                audioProfileRepairFence.release()
+            }
+            transition
+        } finally {
+            if (pendingProfileRepairProtection) {
+                audioProfileRepairFence.finishPendingProtection()
+            }
+        }
+
         automaticMediaResumeAllowed = !transition.current.enabled ||
             transition.current.state == RemoteDeviceAudioGuardState.IDLE ||
             transition.current.state == RemoteDeviceAudioGuardState.LOCAL
 
         // A repair we skipped because another host owned the AirPods has to be retried once
         // they let go, otherwise the phone would sit without its audio profiles.
-        if (audioProfileRepairDeferred && !remoteHostOwnsAudio()) {
-            audioProfileRepairDeferred = false
-            if (!isAirPodsA2dpConnected) {
-                requestBoundedAudioProfileRepair(
-                    reason = "remote_released",
-                    target = resolveSavedAirPodsDevice(),
-                    delayMs = 0L,
-                )
-            }
-        }
+        drainDeferredAudioProfileRepair()
 
         refreshGuardHealth()
 
@@ -1016,6 +1098,18 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 PhoneSoundRoutingController.setGuardEnabled(false, "service shutdown")
             }
             runCatching { remoteDeviceRemotePreferences.setA2dpStartGuardLease(0L) }
+        }
+    }
+
+    private fun drainDeferredAudioProfileRepair() {
+        if (serviceShuttingDown || !audioProfileRepairDeferred || remoteHostOwnsAudio()) return
+        audioProfileRepairDeferred = false
+        if (!isAirPodsA2dpConnected) {
+            requestBoundedAudioProfileRepair(
+                reason = "remote_released",
+                target = resolveSavedAirPodsDevice(),
+                delayMs = 0L,
+            )
         }
     }
 
@@ -1356,7 +1450,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 "settings", MODE_PRIVATE
             )
         )
-        startAudioPlaybackMonitor()
+        if (PERIODIC_SMART_ROUTING_MEDIA_REPORTING_ENABLED) {
+            startAudioPlaybackMonitor()
+        }
         PhoneSoundRoutingController.initialize(this, audioManager)
         dispatchRemoteDeviceGuard(
             RemoteDeviceAudioGuardEvent.EnabledChanged(
@@ -3338,6 +3434,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     private fun startMediaInformationReporter(lease: AacpSocketLease) {
         stopMediaInformationReporter()
+        // Keep the implementation available for route-aware device testing, but do not feed
+        // speaker-routed Android playback into Smart Routing decisions in the stable guard.
+        if (!PERIODIC_SMART_ROUTING_MEDIA_REPORTING_ENABLED) return
         if (!BluetoothConnectionManager.isCurrent(lease)) return
         // Smart Routing peers use this periodic report as status, not as an ownership request.
         mediaInformationReporterJob = aacpReaderScope.launch {
@@ -3969,6 +4068,23 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }
     }
 
+    private fun runAudioProfileOperation(
+        requestGuard: (() -> Boolean)?,
+        operation: () -> Unit,
+    ): Boolean {
+        if (requestGuard == null) {
+            // A null guard is reserved for an explicit user connection, which intentionally
+            // overrides automatic remote-audio protection as the manual recovery path.
+            if (serviceShuttingDown) return false
+            operation()
+            return true
+        }
+        return audioProfileRepairFence.runIfAllowed(
+            additionalGuard = { !serviceShuttingDown && requestGuard() },
+            operation = operation,
+        )
+    }
+
     fun connectAudio(
         context: Context,
         device: BluetoothDevice?,
@@ -3988,15 +4104,23 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             BluetoothDevice::class.java,
                             Int::class.java,
                         )
-                        Log.d(TAG, "calling A2DP.setConnectionPolicy for ${device.address} to 100")
-                        policyMethod.invoke(proxy, device, 100)
+                        if (!runAudioProfileOperation(requestGuard) {
+                                Log.d(
+                                    TAG,
+                                    "calling A2DP.setConnectionPolicy for ${device.address} to 100"
+                                )
+                                policyMethod.invoke(proxy, device, 100)
+                            }
+                        ) return
                     } else {
                         Log.d(TAG, "not setting connection policy for A2DP, no BLUETOOTH_PRIVILEGED permission. just called connect")
                     }
-                    if (requestGuard?.invoke() == false || serviceShuttingDown) return
                     val connectMethod =
                         proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
-                    connectMethod.invoke(proxy, device)
+                    if (!runAudioProfileOperation(requestGuard) {
+                            connectMethod.invoke(proxy, device)
+                        }
+                    ) return
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not reconnect AirPods A2DP profile", e)
                 } finally {
@@ -4022,11 +4146,16 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             TAG,
                             "calling HEADSET.setConnectionPolicy for ${device.address} to 100"
                         )
-                        policyMethod.invoke(proxy, device, 100)
-                        if (requestGuard?.invoke() == false || serviceShuttingDown) return
+                        if (!runAudioProfileOperation(requestGuard) {
+                                policyMethod.invoke(proxy, device, 100)
+                            }
+                        ) return
                         val connectMethod =
                             proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
-                        connectMethod.invoke(proxy, device)
+                        if (!runAudioProfileOperation(requestGuard) {
+                                connectMethod.invoke(proxy, device)
+                            }
+                        ) return
                     } else {
                         Log.d(TAG, "not setting connection policy for HEADSET, no MODIFIY_PHONE_STATE permission")
                     }

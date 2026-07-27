@@ -118,6 +118,7 @@ class RemoteDeviceAudioGuard(
     private val config: RemoteDeviceAudioGuardConfig = RemoteDeviceAudioGuardConfig(),
     initialSnapshot: RemoteDeviceAudioGuardSnapshot = RemoteDeviceAudioGuardSnapshot(),
 ) {
+    @Volatile
     var snapshot: RemoteDeviceAudioGuardSnapshot = initialSnapshot
         private set
 
@@ -136,7 +137,7 @@ class RemoteDeviceAudioGuard(
         val base = preTick?.current ?: snapshot
         val main = reduce(base, event, nowMs, config)
         snapshot = main.current
-        return if (preTick == null) {
+        val combined = if (preTick == null) {
             main
         } else {
             RemoteDeviceAudioGuardTransition(
@@ -145,6 +146,9 @@ class RemoteDeviceAudioGuard(
                 actions = preTick.actions + main.actions,
             )
         }
+        return combined.copy(
+            actions = combined.actions.reconcileProtectionFor(combined.current.barrierEnabled),
+        )
     }
 
     companion object {
@@ -196,21 +200,44 @@ class RemoteDeviceAudioGuard(
                 }
 
                 RemoteDeviceAudioGuardEvent.AacpDisconnected -> {
-                    actions.releaseIfNeeded(snapshot)
-                    val stickyUntil = if (snapshot.state == RemoteDeviceAudioGuardState.REMOTE_ACTIVE ||
-                        snapshot.state == RemoteDeviceAudioGuardState.REMOTE_GRACE
-                    ) {
-                        deadlineAfter(nowMs, config.stickyRemoteWindowMs)
-                    } else {
-                        snapshot.recentRemoteUntilMs
+                    val rememberedRemoteUntil = snapshot.recentRemoteUntilMs
+                        ?.takeIf { nowMs < it }
+                    val stickyUntil = when {
+                        snapshot.aacpConnected &&
+                            (snapshot.state == RemoteDeviceAudioGuardState.REMOTE_ACTIVE ||
+                                snapshot.state == RemoteDeviceAudioGuardState.REMOTE_GRACE &&
+                                snapshot.recentRemoteUntilMs == null) ->
+                            deadlineAfter(nowMs, config.stickyRemoteWindowMs)
+                        rememberedRemoteUntil != null -> rememberedRemoteUntil
+                        else -> null
                     }
-                    next = snapshot.copy(
-                        state = RemoteDeviceAudioGuardState.OFF,
-                        aacpConnected = false,
-                        deadlineMs = null,
-                        phaseEndMs = null,
-                        recentRemoteUntilMs = stickyUntil,
-                    )
+                    next = if (snapshot.enabled && stickyUntil != null &&
+                        snapshot.barrierEnabled
+                    ) {
+                        actions += RemoteDeviceAudioGuardAction.RefreshNativeLease(
+                            config.nativeLeaseDurationMs
+                        )
+                        snapshot.copy(
+                            state = RemoteDeviceAudioGuardState.REMOTE_GRACE,
+                            aacpConnected = false,
+                            deadlineMs = retryDeadline(
+                                nowMs,
+                                config.graceRetryIntervalMs,
+                                stickyUntil,
+                            ),
+                            phaseEndMs = stickyUntil,
+                            recentRemoteUntilMs = stickyUntil,
+                        )
+                    } else {
+                        actions.releaseIfNeeded(snapshot)
+                        snapshot.copy(
+                            state = RemoteDeviceAudioGuardState.OFF,
+                            aacpConnected = false,
+                            deadlineMs = null,
+                            phaseEndMs = null,
+                            recentRemoteUntilMs = rememberedRemoteUntil,
+                        )
+                    }
                 }
 
                 is RemoteDeviceAudioGuardEvent.AudioSourceObserved -> {
@@ -296,8 +323,34 @@ class RemoteDeviceAudioGuard(
 
                 RemoteDeviceAudioGuardEvent.Tick -> {
                     val deadlineReached = snapshot.deadlineMs?.let { nowMs >= it } == true
-                    next = if (!snapshot.enabled || !snapshot.aacpConnected || !deadlineReached) {
+                    next = if (!snapshot.enabled || !deadlineReached) {
                         snapshot
+                    } else if (!snapshot.aacpConnected) {
+                        if (snapshot.state != RemoteDeviceAudioGuardState.REMOTE_GRACE) {
+                            snapshot
+                        } else {
+                            val phaseEnded = snapshot.phaseEndMs?.let { nowMs >= it } != false
+                            if (phaseEnded) {
+                                actions.releaseIfNeeded(snapshot)
+                                snapshot.copy(
+                                    state = RemoteDeviceAudioGuardState.OFF,
+                                    deadlineMs = null,
+                                    phaseEndMs = null,
+                                    recentRemoteUntilMs = null,
+                                )
+                            } else {
+                                actions += RemoteDeviceAudioGuardAction.RefreshNativeLease(
+                                    config.nativeLeaseDurationMs
+                                )
+                                snapshot.copy(
+                                    deadlineMs = retryDeadline(
+                                        nowMs,
+                                        config.graceRetryIntervalMs,
+                                        snapshot.phaseEndMs,
+                                    ),
+                                )
+                            }
+                        }
                     } else {
                         when (snapshot.state) {
                             RemoteDeviceAudioGuardState.PROBING -> {
@@ -391,7 +444,11 @@ class RemoteDeviceAudioGuard(
             nowMs: Long,
             config: RemoteDeviceAudioGuardConfig,
         ): RemoteDeviceAudioGuardSnapshot {
-            val phaseEnd = deadlineAfter(nowMs, config.probeTimeoutMs)
+            val uncappedPhaseEnd = deadlineAfter(nowMs, config.probeTimeoutMs)
+            val phaseEnd = recentRemoteUntilMs
+                ?.takeIf { nowMs < it }
+                ?.let { minOf(uncappedPhaseEnd, it) }
+                ?: uncappedPhaseEnd
             return copy(
                 state = RemoteDeviceAudioGuardState.PROBING,
                 deadlineMs = retryDeadline(nowMs, config.probeRetryIntervalMs, phaseEnd),
@@ -417,7 +474,11 @@ class RemoteDeviceAudioGuard(
                 actions.protectOrRefresh(config)
             }
             actions += RemoteDeviceAudioGuardAction.RequestAudioSource
-            val phaseEnd = deadlineAfter(nowMs, config.remoteGraceMs)
+            val uncappedPhaseEnd = deadlineAfter(nowMs, config.remoteGraceMs)
+            val phaseEnd = recentRemoteUntilMs
+                ?.takeIf { nowMs < it }
+                ?.let { minOf(uncappedPhaseEnd, it) }
+                ?: uncappedPhaseEnd
             return copy(
                 state = RemoteDeviceAudioGuardState.REMOTE_GRACE,
                 deadlineMs = retryDeadline(nowMs, config.graceRetryIntervalMs, phaseEnd),
@@ -448,6 +509,18 @@ class RemoteDeviceAudioGuard(
             if (snapshot.barrierEnabled) {
                 add(RemoteDeviceAudioGuardAction.DisableBarrier)
                 add(RemoteDeviceAudioGuardAction.ClearNativeLease)
+            }
+        }
+
+        private fun List<RemoteDeviceAudioGuardAction>.reconcileProtectionFor(
+            barrierEnabled: Boolean,
+        ): List<RemoteDeviceAudioGuardAction> = filterNot { action ->
+            if (barrierEnabled) {
+                action == RemoteDeviceAudioGuardAction.DisableBarrier ||
+                    action == RemoteDeviceAudioGuardAction.ClearNativeLease
+            } else {
+                action == RemoteDeviceAudioGuardAction.EnableBarrier ||
+                    action is RemoteDeviceAudioGuardAction.RefreshNativeLease
             }
         }
 

@@ -417,8 +417,13 @@ class RemoteDeviceAudioGuardTest {
         guard.dispatch(remoteMedia(), nowMs = 100L)
 
         val disconnected = guard.dispatch(RemoteDeviceAudioGuardEvent.AacpDisconnected, nowMs = 200L)
-        assertEquals(RemoteDeviceAudioGuardState.OFF, disconnected.state)
+        assertEquals(RemoteDeviceAudioGuardState.REMOTE_GRACE, disconnected.state)
+        assertTrue(disconnected.current.barrierEnabled)
         assertEquals(30_200L, disconnected.current.recentRemoteUntilMs)
+        assertEquals(
+            listOf(RemoteDeviceAudioGuardAction.RefreshNativeLease(8_000L)),
+            disconnected.actions,
+        )
 
         val reconnected = guard.dispatch(RemoteDeviceAudioGuardEvent.AacpConnected, nowMs = 1_000L)
         assertEquals(RemoteDeviceAudioGuardState.PROBING, reconnected.state)
@@ -438,6 +443,83 @@ class RemoteDeviceAudioGuardTest {
             ),
             failedClosed.actions,
         )
+    }
+
+    @Test
+    fun `remote disconnect keeps bounded protection until sticky window expires`() {
+        val guard = connectedGuard()
+        guard.dispatch(remoteMedia(), nowMs = 100L)
+
+        val disconnected = guard.dispatch(
+            RemoteDeviceAudioGuardEvent.AacpDisconnected,
+            nowMs = 200L,
+        )
+
+        assertEquals(RemoteDeviceAudioGuardState.REMOTE_GRACE, disconnected.state)
+        assertFalse(disconnected.current.aacpConnected)
+        assertTrue(disconnected.current.barrierEnabled)
+        assertEquals(1_200L, disconnected.nextDeadlineMs)
+        assertEquals(30_200L, disconnected.current.phaseEndMs)
+        assertEquals(30_200L, disconnected.current.recentRemoteUntilMs)
+        assertEquals(
+            listOf(RemoteDeviceAudioGuardAction.RefreshNativeLease(8_000L)),
+            disconnected.actions,
+        )
+
+        val refresh = guard.dispatch(RemoteDeviceAudioGuardEvent.Tick, nowMs = 1_200L)
+        assertEquals(RemoteDeviceAudioGuardState.REMOTE_GRACE, refresh.state)
+        assertEquals(2_200L, refresh.nextDeadlineMs)
+        assertEquals(
+            listOf(RemoteDeviceAudioGuardAction.RefreshNativeLease(8_000L)),
+            refresh.actions,
+        )
+
+        val expired = guard.dispatch(RemoteDeviceAudioGuardEvent.Tick, nowMs = 30_200L)
+        assertEquals(RemoteDeviceAudioGuardState.OFF, expired.state)
+        assertFalse(expired.current.barrierEnabled)
+        assertEquals(null, expired.current.recentRemoteUntilMs)
+        assertEquals(
+            listOf(
+                RemoteDeviceAudioGuardAction.DisableBarrier,
+                RemoteDeviceAudioGuardAction.ClearNativeLease,
+            ),
+            expired.actions,
+        )
+    }
+
+    @Test
+    fun `reconnect without fresh remote evidence cannot extend sticky protection`() {
+        val guard = connectedGuard()
+        guard.dispatch(remoteMedia(), nowMs = 100L)
+        val firstDisconnect = guard.dispatch(
+            RemoteDeviceAudioGuardEvent.AacpDisconnected,
+            nowMs = 200L,
+        )
+        assertEquals(30_200L, firstDisconnect.current.recentRemoteUntilMs)
+
+        guard.dispatch(RemoteDeviceAudioGuardEvent.AacpConnected, nowMs = 28_500L)
+        val stickyGrace = guard.dispatch(RemoteDeviceAudioGuardEvent.Tick, nowMs = 30_000L)
+        assertEquals(RemoteDeviceAudioGuardState.REMOTE_GRACE, stickyGrace.state)
+        assertEquals(30_200L, stickyGrace.current.phaseEndMs)
+
+        val secondDisconnect = guard.dispatch(
+            RemoteDeviceAudioGuardEvent.AacpDisconnected,
+            nowMs = 30_100L,
+        )
+        assertEquals(RemoteDeviceAudioGuardState.REMOTE_GRACE, secondDisconnect.state)
+        assertEquals(30_200L, secondDisconnect.current.phaseEndMs)
+        assertEquals(30_200L, secondDisconnect.current.recentRemoteUntilMs)
+
+        val lastReconnect = guard.dispatch(
+            RemoteDeviceAudioGuardEvent.AacpConnected,
+            nowMs = 30_150L,
+        )
+        assertEquals(RemoteDeviceAudioGuardState.PROBING, lastReconnect.state)
+        assertEquals(30_200L, lastReconnect.current.phaseEndMs)
+
+        val expired = guard.dispatch(RemoteDeviceAudioGuardEvent.Tick, nowMs = 30_200L)
+        assertEquals(RemoteDeviceAudioGuardState.IDLE, expired.state)
+        assertFalse(expired.current.barrierEnabled)
     }
 
     @Test
@@ -500,6 +582,24 @@ class RemoteDeviceAudioGuardTest {
                 RemoteDeviceAudioGuardAction.RequestAudioSource,
             ),
             lateObservation.actions,
+        )
+    }
+
+    @Test
+    fun `overdue probe cannot clear protection restored by remote observation`() {
+        val guard = enabledGuard()
+        guard.dispatch(RemoteDeviceAudioGuardEvent.AacpConnected, nowMs = 0L)
+
+        val remote = guard.dispatch(remoteMedia(), nowMs = 1_600L)
+
+        assertEquals(RemoteDeviceAudioGuardState.REMOTE_ACTIVE, remote.state)
+        assertTrue(remote.current.barrierEnabled)
+        assertEquals(
+            listOf(
+                RemoteDeviceAudioGuardAction.RefreshNativeLease(8_000L),
+                RemoteDeviceAudioGuardAction.EnableBarrier,
+            ),
+            remote.actions,
         )
     }
 

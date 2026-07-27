@@ -1,5 +1,7 @@
 package me.kavishdevar.librepods.bluetooth
 
+import java.util.concurrent.atomic.AtomicInteger
+
 internal data class ReconnectLifecycleToken(
     val generation: Long,
     val operation: Long,
@@ -72,5 +74,63 @@ internal class ReconnectLifecycleGate {
         suppressed = false
         generation++
         inFlight = null
+    }
+}
+
+/** Serializes automatic audio-profile connects against remote-audio protection changes. */
+internal class AudioProfileRepairFence {
+    private val operationLock = Any()
+    private var guardProtectionActive = false
+    // This becomes visible without waiting for operationLock, so a protection request that
+    // arrives during setConnectionPolicy blocks the callback's following connect call.
+    private val pendingProtectionCount = AtomicInteger(0)
+
+    val isProtected: Boolean
+        get() {
+            if (pendingProtectionCount.get() > 0) return true
+            return synchronized(operationLock) {
+                guardProtectionActive || pendingProtectionCount.get() > 0
+            }
+        }
+
+    fun protect(): Boolean = synchronized(operationLock) {
+        val newlyProtected = !guardProtectionActive
+        guardProtectionActive = true
+        newlyProtected
+    }
+
+    fun release() = synchronized(operationLock) {
+        guardProtectionActive = false
+    }
+
+    fun beginPendingProtection() {
+        pendingProtectionCount.incrementAndGet()
+    }
+
+    fun finishPendingProtection(): Boolean {
+        decrementPendingProtection()
+        return !isProtected
+    }
+
+    fun runIfAllowed(
+        additionalGuard: () -> Boolean,
+        operation: () -> Unit,
+    ): Boolean = synchronized(operationLock) {
+        if (guardProtectionActive || pendingProtectionCount.get() > 0 || !additionalGuard()) {
+            false
+        } else {
+            operation()
+            true
+        }
+    }
+
+    private fun decrementPendingProtection(): Int {
+        while (true) {
+            val current = pendingProtectionCount.get()
+            check(current > 0) { "No pending audio-profile protection to finish" }
+            if (pendingProtectionCount.compareAndSet(current, current - 1)) {
+                return current - 1
+            }
+        }
     }
 }
