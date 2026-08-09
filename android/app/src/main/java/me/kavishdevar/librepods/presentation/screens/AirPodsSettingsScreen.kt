@@ -140,6 +140,7 @@ fun AirPodsSettingsRoute(
     navigateToAdaptiveStrength: () -> Unit,
     navigateToEqualizer: () -> Unit,
     navigateToHeadTracking: () -> Unit,
+    navigateToHeartRate: () -> Unit,
     navigateToAccessibility: () -> Unit,
     navigateToVersion: () -> Unit,
     navigateToTroubleshooting: () -> Unit,
@@ -185,6 +186,7 @@ fun AirPodsSettingsRoute(
             navigateToAdaptiveStrength = navigateToAdaptiveStrength,
             navigateToEqualizer = navigateToEqualizer,
             navigateToHeadTracking = navigateToHeadTracking,
+            navigateToHeartRate = navigateToHeartRate,
             navigateToAccessibility = navigateToAccessibility,
             navigateToVersion = navigateToVersion,
             navigateToTroubleshooting = navigateToTroubleshooting,
@@ -227,6 +229,7 @@ fun AirPodsSettingsScreen(
         navigateToAdaptiveStrength: () -> Unit,
         navigateToEqualizer: () -> Unit,
         navigateToHeadTracking: () -> Unit,
+        navigateToHeartRate: () -> Unit,
         navigateToAccessibility: () -> Unit,
         navigateToVersion: () -> Unit,
         navigateToTroubleshooting: () -> Unit,
@@ -345,6 +348,19 @@ fun AirPodsSettingsScreen(
                         vendorIdHook = state.vendorIdHook,
                         navigateToHearingProtection = navigateToHearingProtection,
                         navigateToHearingAid = navigateToHearingAid
+                    )
+                }
+            }
+
+            if (state.heartRateState.supported) {
+                item(key = "spacer_heart_rate") {
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+                item(key = "heart_rate") {
+                    StyledListItem(
+                        name = stringResource(R.string.heart_rate),
+                        description = heartRateSummaryText(state.heartRateState),
+                        onClick = navigateToHeartRate,
                     )
                 }
             }
@@ -961,6 +977,7 @@ fun AirPodsSettingsScreenPreviewApple() {
                 navigateToAdaptiveStrength = {},
                 navigateToEqualizer = {},
                 navigateToHeadTracking = {},
+                navigateToHeartRate = {},
                 navigateToAccessibility = {},
                 navigateToVersion = {},
                 navigateToTroubleshooting = {},
@@ -1008,6 +1025,7 @@ fun AirPodsSettingsScreenPreviewMaterial() {
                 navigateToAdaptiveStrength = {},
                 navigateToEqualizer = {},
                 navigateToHeadTracking = {},
+                navigateToHeartRate = {},
                 navigateToAccessibility = {},
                 navigateToVersion = {},
                 navigateToTroubleshooting = {},

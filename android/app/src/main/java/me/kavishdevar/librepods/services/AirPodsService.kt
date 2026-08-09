@@ -143,6 +143,9 @@ import me.kavishdevar.librepods.heart.HrmAcquisitionToken
 import me.kavishdevar.librepods.heart.HrmSessionKey
 import me.kavishdevar.librepods.heart.OneShotSensorCleanup
 import me.kavishdevar.librepods.heart.SensorResourceOwner
+import me.kavishdevar.librepods.health.HealthConnectExportState
+import me.kavishdevar.librepods.health.HealthConnectHeartRateExporter
+import me.kavishdevar.librepods.health.HeartRateExportAcquisitionIdentity
 import me.kavishdevar.librepods.presentation.overlays.IslandWindow
 import me.kavishdevar.librepods.presentation.overlays.PopupWindow
 import me.kavishdevar.librepods.presentation.widgets.BatteryWidget
@@ -250,6 +253,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     )
     private lateinit var heartRateRuntime: HeartRateRuntimeCoordinator
     private lateinit var heartRatePreferences: SharedPreferences
+    private lateinit var healthConnectHeartRateExporter: HealthConnectHeartRateExporter
     @Volatile
     private var heartRateSessionKey: HrmSessionKey? = null
     private data class ConnectionNotificationContent(
@@ -1277,6 +1281,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     private fun initializeHeartRateRuntime() {
         heartRatePreferences = getSharedPreferences("heart_rate_private", MODE_PRIVATE)
+        healthConnectHeartRateExporter = HealthConnectHeartRateExporter(
+            context = this,
+            sharedPreferences = heartRatePreferences,
+            scope = heartRateScope,
+        )
         heartRateRuntime = HeartRateRuntimeCoordinator(
             scope = heartRateScope,
             elapsedRealtimeMillis = SystemClock::elapsedRealtime,
@@ -1318,8 +1327,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     stopHeadTrackingTransport(lease)
                 }
 
-                override fun publishMeasurement(measurement: HeartRateMeasurement) {
-                    onValidatedHeartRateMeasurement(measurement)
+                override fun publishMeasurement(
+                    acquisition: HrmAcquisitionToken,
+                    measurement: HeartRateMeasurement,
+                ) {
+                    onValidatedHeartRateMeasurement(acquisition, measurement)
                 }
             },
         )
@@ -1328,6 +1340,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 heartRatePreferences.getBoolean(HEART_RATE_MONITORING_ENABLED, false)
             )
         }
+        healthConnectHeartRateExporter.refresh()
     }
 
     val heartRateState: StateFlow<HeartRateUiState>
@@ -1335,6 +1348,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     val headTrackingActiveState: StateFlow<Boolean>
         get() = heartRateRuntime.headTrackingActive
+
+    val healthConnectExportState: StateFlow<HealthConnectExportState>
+        get() = healthConnectHeartRateExporter.state
 
     fun setHeartRateMonitoringEnabled(enabled: Boolean) {
         heartRatePreferences.edit { putBoolean(HEART_RATE_MONITORING_ENABLED, enabled) }
@@ -1345,8 +1361,34 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         heartRateRuntime.retry()
     }
 
-    private fun onValidatedHeartRateMeasurement(measurement: HeartRateMeasurement) {
-        // Health Connect export consumes this callback after explicit permission is confirmed.
+    fun refreshHealthConnectHeartRateExport() {
+        healthConnectHeartRateExporter.refresh()
+    }
+
+    fun setHealthConnectHeartRateExportEnabled(enabled: Boolean) {
+        healthConnectHeartRateExporter.setEnabled(enabled)
+    }
+
+    fun setHealthConnectDetailedSamples(enabled: Boolean) {
+        healthConnectHeartRateExporter.setDetailedSamples(enabled)
+    }
+
+    fun markHealthConnectHeartRatePermissionDenied() {
+        healthConnectHeartRateExporter.markPermissionDenied()
+    }
+
+    private fun onValidatedHeartRateMeasurement(
+        acquisition: HrmAcquisitionToken,
+        measurement: HeartRateMeasurement,
+    ) {
+        healthConnectHeartRateExporter.accept(
+            acquisitionIdentity = HeartRateExportAcquisitionIdentity(
+                connectionGeneration = acquisition.key.generation,
+                sessionEpoch = acquisition.key.epoch,
+                acquisition = acquisition.acquisition,
+            ),
+            measurement = measurement,
+        )
     }
 
     private fun currentLeaseFor(key: HrmSessionKey): AacpSocketLease? =
@@ -4420,7 +4462,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             pendingAacpSocket = null
             aacpManager.disconnected(currentLease)
         }
-        runBlocking { heartRateRuntime.destroyAndAwait() }
+        runBlocking {
+            healthConnectHeartRateExporter.closeAndAwait()
+            heartRateRuntime.destroyAndAwait()
+        }
         heartRateDecoder.reset()
         heartRateSessionKey = null
         heartRateScope.cancel()
@@ -4908,8 +4953,15 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         expectedLease: AacpSocketLease? = null,
     ): Boolean = releaseHeadTracking(HeadTrackingRequestSource.UI_SCREEN, expectedLease)
 
-    fun requestGestureHeadTracking(): Boolean =
-        requestHeadTracking(HeadTrackingRequestSource.GESTURE)
+    suspend fun requestGestureHeadTracking(): Boolean {
+        val lease = BluetoothConnectionManager.currentAacpSocketLease() ?: return false
+        if (!BluetoothConnectionManager.isCurrent(lease)) return false
+        val key = currentHeartRateKeyFor(lease) ?: return false
+        return heartRateRuntime.requestHeadTrackingImmediately(
+            key,
+            HeadTrackingRequestSource.GESTURE,
+        )
+    }
 
     fun releaseGestureHeadTracking(): Boolean =
         releaseHeadTracking(HeadTrackingRequestSource.GESTURE)

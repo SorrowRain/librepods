@@ -50,7 +50,10 @@ internal interface HeartRateRuntimeSink {
         cleanup: OneShotSensorCleanup,
     )
 
-    fun publishMeasurement(measurement: HeartRateMeasurement)
+    fun publishMeasurement(
+        acquisition: HrmAcquisitionToken,
+        measurement: HeartRateMeasurement,
+    )
 }
 
 /**
@@ -218,6 +221,19 @@ internal class HeartRateRuntimeCoordinator(
         }
     }
 
+    /** Requests a grant without leaving a deferred claim behind when HRM owns the sensor. */
+    suspend fun requestHeadTrackingImmediately(
+        key: HrmSessionKey,
+        source: HeadTrackingRequestSource,
+    ): Boolean = mutex.withLock {
+        executeHeadTrackingClaimActionsLocked(headTrackingClaims.request(key, source))
+        val granted = headTrackingClaims.isSourceGranted(key, source)
+        if (!granted) {
+            executeHeadTrackingClaimActionsLocked(headTrackingClaims.release(key, source))
+        }
+        granted
+    }
+
     fun releaseHeadTracking(
         key: HrmSessionKey,
         source: HeadTrackingRequestSource,
@@ -306,7 +322,7 @@ internal class HeartRateRuntimeCoordinator(
             is HeartRateSessionAction.ScheduleWatchdog ->
                 scheduleWatchdogLocked(action.acquisition, action.watchdog)
             is HeartRateSessionAction.PublishMeasurement -> {
-                sink.publishMeasurement(action.measurement)
+                sink.publishMeasurement(action.acquisition, action.measurement)
                 scheduleFreshnessUpdateLocked(action.acquisition)
             }
             is HeartRateSessionAction.ReleaseSensorResource -> {

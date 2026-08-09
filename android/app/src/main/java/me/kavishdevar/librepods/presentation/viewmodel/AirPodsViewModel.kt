@@ -32,6 +32,7 @@ import androidx.core.content.edit
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -54,6 +55,9 @@ import me.kavishdevar.librepods.data.ControlCommandRepository
 import me.kavishdevar.librepods.data.CustomEq
 import me.kavishdevar.librepods.data.StemAction
 import me.kavishdevar.librepods.data.XposedRemotePrefProvider
+import me.kavishdevar.librepods.heart.HeartRateUiState
+import me.kavishdevar.librepods.health.HealthConnectExportState
+import me.kavishdevar.librepods.health.HealthConnectExportStatus
 import me.kavishdevar.librepods.services.AirPodsService
 
 @Suppress("ArrayInDataClass")
@@ -80,6 +84,8 @@ data class AirPodsUiState(
 
     val headTrackingActive: Boolean = false,
     val headGesturesEnabled: Boolean = true,
+    val heartRateState: HeartRateUiState = HeartRateUiState(),
+    val healthConnectExportState: HealthConnectExportState = HealthConnectExportState(),
 
     val eqData: FloatArray = floatArrayOf(),
 
@@ -146,6 +152,10 @@ val demoState = AirPodsUiState(
 
     headTrackingActive = true,
     headGesturesEnabled = true,
+    heartRateState = HeartRateUiState(supported = true),
+    healthConnectExportState = HealthConnectExportState(
+        status = HealthConnectExportStatus.READY,
+    ),
 
     automaticEarDetectionEnabled = true,
     automaticConnectionEnabled = true,
@@ -216,6 +226,7 @@ class AirPodsViewModel(
         observeATT()
         observeSharedPreferences()
         observeBilling()
+        observeSensorStates()
         if (isDemoMode) activateDemoMode()
         isReady = true
     }
@@ -232,6 +243,10 @@ class AirPodsViewModel(
     private val xposedRemotePref = XposedRemotePrefProvider.create()
 
     private lateinit var broadcastReceiver: BroadcastReceiver
+
+    private var heartRateStateJob: Job? = null
+    private var headTrackingStateJob: Job? = null
+    private var healthConnectStateJob: Job? = null
 
 //    private val _cameraAction = MutableStateFlow(
 //        sharedPreferences.getString("camera_action", null)
@@ -270,6 +285,9 @@ class AirPodsViewModel(
     }
 
     override fun onCleared() {
+        heartRateStateJob?.cancel()
+        headTrackingStateJob?.cancel()
+        healthConnectStateJob?.cancel()
         listeners.forEach { (id, listener) ->
             controlRepo.remove(id, listener)
         }
@@ -301,6 +319,36 @@ class AirPodsViewModel(
                         setHeadGesturesEnabled(false)
                         _uiState.update { it.copy(isPremium = false) }
                     }
+                }
+            }
+        }
+    }
+
+    private fun observeSensorStates() {
+        val boundService = service
+        heartRateStateJob?.cancel()
+        heartRateStateJob = viewModelScope.launch {
+            boundService.heartRateState.collect { heartRateState ->
+                if (!isDemoMode) {
+                    _uiState.update { it.copy(heartRateState = heartRateState) }
+                }
+            }
+        }
+
+        headTrackingStateJob?.cancel()
+        headTrackingStateJob = viewModelScope.launch {
+            boundService.headTrackingActiveState.collect { active ->
+                if (!isDemoMode) {
+                    _uiState.update { it.copy(headTrackingActive = active) }
+                }
+            }
+        }
+
+        healthConnectStateJob?.cancel()
+        healthConnectStateJob = viewModelScope.launch {
+            boundService.healthConnectExportState.collect { exportState ->
+                if (!isDemoMode) {
+                    _uiState.update { it.copy(healthConnectExportState = exportState) }
                 }
             }
         }
@@ -634,12 +682,34 @@ class AirPodsViewModel(
 
     fun startHeadTracking() {
         service.startHeadTracking()
-        _uiState.update { it.copy(headTrackingActive = true) }
     }
 
     fun stopHeadTracking() {
         service.stopHeadTracking()
-        _uiState.update { it.copy(headTrackingActive = false) }
+    }
+
+    fun setHeartRateMonitoringEnabled(enabled: Boolean) {
+        if (!isDemoMode) service.setHeartRateMonitoringEnabled(enabled)
+    }
+
+    fun retryHeartRateMonitoring() {
+        if (!isDemoMode) service.retryHeartRateMonitoring()
+    }
+
+    fun refreshHealthConnectHeartRateExport() {
+        if (!isDemoMode) service.refreshHealthConnectHeartRateExport()
+    }
+
+    fun setHealthConnectHeartRateExportEnabled(enabled: Boolean) {
+        if (!isDemoMode) service.setHealthConnectHeartRateExportEnabled(enabled)
+    }
+
+    fun setHealthConnectDetailedSamples(enabled: Boolean) {
+        if (!isDemoMode) service.setHealthConnectDetailedSamples(enabled)
+    }
+
+    fun markHealthConnectHeartRatePermissionDenied() {
+        if (!isDemoMode) service.markHealthConnectHeartRatePermissionDenied()
     }
 
     fun setATTCharacteristicValue(handle: ATTHandles, value: ByteArray) {
@@ -771,7 +841,12 @@ class AirPodsViewModel(
         if (isDemoMode) {
             isDemoMode = false
             _uiState.update {
-                it.copy(isLocallyConnected = false)
+                it.copy(
+                    isLocallyConnected = false,
+                    heartRateState = service.heartRateState.value,
+                    headTrackingActive = service.headTrackingActiveState.value,
+                    healthConnectExportState = service.healthConnectExportState.value,
+                )
             }
         } else {
             service.disconnectAirPods()

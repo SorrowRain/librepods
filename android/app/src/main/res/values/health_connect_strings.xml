@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="health_connect_rationale_title">Heart rate in Health Connect</string>
+    <string name="health_connect_rationale_access">LibrePods writes heart-rate averages only after you enable export and grant write access. It never requests access to read your health data.</string>
+    <string name="health_connect_rationale_frequency">Minute mode writes one average per minute. Detailed mode writes one average per second.</string>
+    <string name="health_connect_rationale_control">Turning export off stops accepting new samples, cancels pending work, and discards unsaved samples. You can also revoke access at any time in Health Connect.</string>
+    <string name="health_connect_rationale_storage">Heart-rate records are stored and managed by Health Connect on this device. LibrePods does not upload them or include them in app logs.</string>
+    <string name="health_connect_rationale_close">Close</string>
+    <string name="health_connect_export_section">Health Connect</string>
+    <string name="health_connect_export_heart_rate">Export heart rate</string>
+    <string name="health_connect_export_description">Optional and off by default. LibrePods writes heart-rate averages only after write permission is granted and never reads health data.</string>
+    <string name="health_connect_detailed_samples">Detailed samples</string>
+    <string name="health_connect_detailed_samples_description">Write one-second averages instead of one average per minute.</string>
+    <string name="health_connect_status_unavailable">Health Connect is unavailable on this device.</string>
+    <string name="health_connect_status_update_required">Health Connect must be updated before export can be enabled.</string>
+    <string name="health_connect_status_permission_required">Heart-rate write permission is required.</string>
+    <string name="health_connect_status_permission_denied">Heart-rate write permission was not granted.</string>
+    <string name="health_connect_status_ready">Write permission granted. Export is off.</string>
+    <string name="health_connect_status_enabled">Heart-rate export is enabled.</string>
+    <string name="health_connect_status_error">Health Connect is temporarily unavailable. Export will retry.</string>
+</resources>

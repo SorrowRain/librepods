@@ -56,6 +56,14 @@ internal class HeadTrackingClaimController {
     val isCurrentGrantActive: Boolean
         get() = claimOwner != null && grantedOwner == claimOwner
 
+    fun isSourceGranted(
+        key: HrmSessionKey,
+        source: HeadTrackingRequestSource,
+    ): Boolean = accepts(key) &&
+        source in requestedSources &&
+        claimOwner?.connection?.matches(key) == true &&
+        isCurrentGrantActive
+
     /** Installs the first connection or a strictly newer connection epoch. */
     fun installConnection(key: HrmSessionKey): List<HeadTrackingClaimAction> {
         if (destroyed) return emptyList()

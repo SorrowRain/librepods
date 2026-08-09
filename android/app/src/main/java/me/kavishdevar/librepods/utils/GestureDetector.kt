@@ -97,16 +97,12 @@ class GestureDetector(
         while (verticalAvgBuffer.size < 3) verticalAvgBuffer.add(0.0)
     }
 
-fun startDetection(doNotStop: Boolean = false, onGestureDetected: (Boolean) -> Unit) {
+    fun startDetection(doNotStop: Boolean = false, onGestureDetected: (Boolean) -> Unit) {
         if (isRunning) return
 
         Log.d(TAG, "Starting gesture detection...")
         isRunning = true
         gestureDetectedCallback = onGestureDetected
-
-        if (!doNotStop) {
-            Log.d(TAG, "Head tracking requested: ${airPodsService.requestGestureHeadTracking()}")
-        }
 
         clearData()
 
@@ -114,18 +110,35 @@ fun startDetection(doNotStop: Boolean = false, onGestureDetected: (Boolean) -> U
         prevVertical = 0.0
 
         detectionJob = CoroutineScope(Dispatchers.Default).launch {
-            while (isRunning) {
-                delay(50)
+            var headTrackingGranted = doNotStop
+            try {
+                if (!doNotStop) {
+                    headTrackingGranted = airPodsService.requestGestureHeadTracking()
+                    Log.d(TAG, "Head tracking grant available: $headTrackingGranted")
+                }
+                if (!headTrackingGranted || !isRunning) {
+                    isRunning = false
+                    gestureDetectedCallback = null
+                    return@launch
+                }
 
-                val gesture = detectGestures()
-                if (gesture != null) {
-                    withContext(Dispatchers.Main) {
-                        audio.playConfirmation(gesture)
+                while (isRunning) {
+                    delay(50)
 
-                        gestureDetectedCallback?.invoke(gesture)
-                        stopDetection(doNotStop)
+                    val gesture = detectGestures()
+                    if (gesture != null) {
+                        withContext(Dispatchers.Main) {
+                            audio.playConfirmation(gesture)
+
+                            gestureDetectedCallback?.invoke(gesture)
+                            stopDetection(doNotStop)
+                        }
+                        break
                     }
-                    break
+                }
+            } finally {
+                if (!doNotStop && headTrackingGranted && !isRunning) {
+                    airPodsService.releaseGestureHeadTracking()
                 }
             }
         }

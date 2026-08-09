@@ -160,6 +160,7 @@ dependencies {
     implementation(libs.androidx.navigation3.runtime)
     implementation(libs.androidx.lifecycle.viewmodel.navigation3)
     implementation(libs.androidx.navigationevent)
+    implementation(libs.androidx.health.connect.client)
     testImplementation(kotlin("test-junit"))
 }
 

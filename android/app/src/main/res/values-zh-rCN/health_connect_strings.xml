@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="health_connect_rationale_title">将心率写入健康数据中心</string>
+    <string name="health_connect_rationale_access">只有在你主动开启导出并授予写入权限后，LibrePods 才会写入心率平均值。应用不会请求读取你的健康数据。</string>
+    <string name="health_connect_rationale_frequency">分钟模式每分钟写入一条平均值；详细模式每秒写入一条平均值。</string>
+    <string name="health_connect_rationale_control">关闭导出后，应用会停止接收新样本、取消待处理任务并丢弃尚未保存的样本。你也可以随时在健康数据中心撤销权限。</string>
+    <string name="health_connect_rationale_storage">心率记录由本机的健康数据中心存储和管理。LibrePods 不会上传这些记录，也不会将其写入应用日志。</string>
+    <string name="health_connect_rationale_close">关闭</string>
+    <string name="health_connect_export_section">健康数据中心</string>
+    <string name="health_connect_export_heart_rate">导出心率</string>
+    <string name="health_connect_export_description">此功能可选且默认关闭。只有获得写入权限后，LibrePods 才会写入心率平均值，且不会读取健康数据。</string>
+    <string name="health_connect_detailed_samples">详细样本</string>
+    <string name="health_connect_detailed_samples_description">改为写入每秒平均值，而不是每分钟一条平均值。</string>
+    <string name="health_connect_status_unavailable">此设备无法使用健康数据中心。</string>
+    <string name="health_connect_status_update_required">需要先更新健康数据中心才能启用导出。</string>
+    <string name="health_connect_status_permission_required">需要心率写入权限。</string>
+    <string name="health_connect_status_permission_denied">未授予心率写入权限。</string>
+    <string name="health_connect_status_ready">已授予写入权限，导出仍为关闭状态。</string>
+    <string name="health_connect_status_enabled">心率导出已开启。</string>
+    <string name="health_connect_status_error">健康数据中心暂时不可用，导出将自动重试。</string>
+</resources>

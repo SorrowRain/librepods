@@ -123,6 +123,47 @@ class HeartRateRuntimeCoordinatorTest {
     }
 
     @Test
+    fun `gesture requiring immediate grant is rejected while heart rate owns sensor`() = runBlocking {
+        val fixture = Fixture()
+        val key = key(epoch = 1L)
+        fixture.connectSupportedAndWorn(key)
+
+        assertFalse(
+            fixture.coordinator.requestHeadTrackingImmediately(
+                key,
+                HeadTrackingRequestSource.GESTURE,
+            )
+        )
+        fixture.coordinator.setEnabledAndAwait(false)
+        settle()
+
+        assertEquals(listOf("start-heart-1", "stop-heart-1"), fixture.sink.events)
+        assertFalse(fixture.coordinator.headTrackingActive.value)
+        fixture.close()
+    }
+
+    @Test
+    fun `gesture requiring immediate grant starts only when transport grants it`() = runBlocking {
+        val fixture = Fixture()
+        val key = key(epoch = 1L)
+        fixture.coordinator.installConnectionAndAwait(key)
+
+        assertTrue(
+            fixture.coordinator.requestHeadTrackingImmediately(
+                key,
+                HeadTrackingRequestSource.GESTURE,
+            )
+        )
+        assertEquals(listOf("start-head-1"), fixture.sink.events)
+        assertTrue(fixture.coordinator.headTrackingActive.value)
+
+        fixture.coordinator.releaseHeadTracking(key, HeadTrackingRequestSource.GESTURE)
+        settle()
+        assertEquals(listOf("start-head-1", "stop-head-1"), fixture.sink.events)
+        fixture.close()
+    }
+
+    @Test
     fun `failed and throwing starts retry once then stop cleanly`() = runBlocking {
         val fixture = Fixture(StartBehavior.THROW, StartBehavior.FAILURE)
         val key = key(epoch = 1L)
@@ -442,7 +483,10 @@ class HeartRateRuntimeCoordinatorTest {
             headStops += CleanupUse(cleanup.consume(), cleanup.consume())
         }
 
-        override fun publishMeasurement(measurement: HeartRateMeasurement) {
+        override fun publishMeasurement(
+            acquisition: HrmAcquisitionToken,
+            measurement: HeartRateMeasurement,
+        ) {
             events += "publish-${measurement.sequence}"
             published += measurement
         }
