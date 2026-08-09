@@ -66,7 +66,7 @@ internal object HeartRateUiStateMapper {
         }
 
         return HeartRateUiState(
-            supported = eligibility.supported,
+            supported = eligibility.featureVisible,
             enabled = session.enabled,
             status = status,
             latestBpm = sample?.bpm.takeIf {

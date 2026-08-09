@@ -22,6 +22,7 @@ internal data class HeartRateDeviceInformationConfirmation(
 internal data class HeartRateEligibilityState(
     val currentKey: HrmSessionKey? = null,
     val deviceInformation: HeartRateDeviceInformationConfirmation? = null,
+    val lastConfirmedSupported: Boolean = false,
     val highestEpoch: Long = Long.MIN_VALUE,
     val destroyed: Boolean = false,
 ) {
@@ -33,6 +34,9 @@ internal data class HeartRateEligibilityState(
                 confirmed.modelNumber in HEART_RATE_MODEL_NUMBERS &&
                 Capability.HRM in confirmed.modelCapabilities
         }
+
+    val featureVisible: Boolean
+        get() = !destroyed && if (currentKey != null) supported else lastConfirmedSupported
 
     fun isCurrent(key: HrmSessionKey?): Boolean {
         val current = currentKey ?: return false
@@ -77,6 +81,7 @@ internal object HeartRateEligibilityReducer {
             HeartRateEligibilityEvent.Destroy -> current.copy(
                 currentKey = null,
                 deviceInformation = null,
+                lastConfirmedSupported = false,
                 destroyed = true,
             )
         }
@@ -118,7 +123,14 @@ internal object HeartRateEligibilityReducer {
             modelNumber = event.modelNumber,
             modelCapabilities = event.modelCapabilities.toSet(),
         )
-        if (current.deviceInformation == confirmation) return current
-        return current.copy(deviceInformation = confirmation)
+        val confirmed = current.copy(deviceInformation = confirmation)
+        val lastConfirmedSupported = confirmed.supported
+        if (
+            current.deviceInformation == confirmation &&
+            current.lastConfirmedSupported == lastConfirmedSupported
+        ) {
+            return current
+        }
+        return confirmed.copy(lastConfirmedSupported = lastConfirmedSupported)
     }
 }

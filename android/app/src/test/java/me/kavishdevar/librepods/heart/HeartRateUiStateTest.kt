@@ -141,6 +141,69 @@ class HeartRateUiStateTest {
     }
 
     @Test
+    fun `disconnected confirmed Pro 3 keeps waiting states visible without exposing old BPM`() {
+        val key = key(epoch = 1L)
+        val eligibility = HeartRateEligibilityReducer.reduce(
+            supportedEligibility(key),
+            HeartRateEligibilityEvent.SessionCleared(key),
+        )
+        assertFalse(eligibility.supported)
+        assertTrue(eligibility.featureVisible)
+
+        listOf(
+            HeartRateSessionStatus.RECONNECTING,
+            HeartRateSessionStatus.WAITING_FOR_AIRPODS,
+        ).forEach { status ->
+            val ui = HeartRateUiStateMapper.map(
+                eligibility = eligibility,
+                session = liveSession(key, bpm = 80, sampleTime = 5_000L).copy(
+                    status = status,
+                    key = null,
+                    supportedTransport = false,
+                ),
+                nowElapsedRealtimeMillis = 5_001L,
+            )
+
+            assertTrue(ui.supported, status.name)
+            assertEquals(HeartRateUiStatus.valueOf(status.name), ui.status)
+            assertNull(ui.latestBpm, status.name)
+            assertEquals(
+                HeartRateSampleFreshness.NO_SAMPLE,
+                ui.sampleFreshness,
+                status.name,
+            )
+        }
+    }
+
+    @Test
+    fun `new unconfirmed lease hides the old Pro 3 feature eligibility`() {
+        val oldKey = key(epoch = 1L)
+        val disconnected = HeartRateEligibilityReducer.reduce(
+            supportedEligibility(oldKey),
+            HeartRateEligibilityEvent.SessionCleared(oldKey),
+        )
+        val newKey = key(epoch = 2L)
+        val unconfirmed = HeartRateEligibilityReducer.reduce(
+            disconnected,
+            HeartRateEligibilityEvent.SessionInstalled(newKey),
+        )
+
+        val ui = HeartRateUiStateMapper.map(
+            eligibility = unconfirmed,
+            session = HeartRateSessionState(
+                enabled = true,
+                status = HeartRateSessionStatus.WAITING_FOR_AIRPODS,
+                key = newKey,
+            ),
+            nowElapsedRealtimeMillis = 5_001L,
+        )
+
+        assertFalse(ui.supported)
+        assertNull(ui.latestBpm)
+        assertEquals(HeartRateSampleFreshness.NO_SAMPLE, ui.sampleFreshness)
+    }
+
+    @Test
     fun `UI state string representation redacts health data`() {
         val text = HeartRateUiState(
             supported = true,
