@@ -317,12 +317,28 @@ class RtBuddyHeartRateDecoderTest {
         assertEquals(HeartRateRawLoggingPolicy.SUPPRESS, first.rawLoggingPolicy)
         assertTrue(first.passthroughPackets.isEmpty())
         assertEquals(HeartRateRawLoggingPolicy.SUPPRESS, second.rawLoggingPolicy)
-        assertEquals(1, second.passthroughPackets.size)
-        assertTrue(
-            second.passthroughPackets.single().contentEquals(
-                sensitiveFragment + ordinaryContinuation
-            )
+        assertEquals(2, second.passthroughPackets.size)
+        assertTrue(second.passthroughPackets[0].contentEquals(sensitiveFragment))
+        assertTrue(second.passthroughPackets[1].contentEquals(ordinaryContinuation))
+    }
+
+    @Test
+    fun `speculative one byte prefix does not swallow the next ordinary packet`() {
+        val decoder = decoder()
+        val speculativePrefix = byteArrayOf(0x04)
+        val ordinaryPacket = byteArrayOf(
+            0x04, 0x00, 0x04, 0x00,
+            0x09, 0x00, 0x2D, 0x01, 0x00, 0x00, 0x00,
         )
+
+        val first = decoder.feed(speculativePrefix)
+        val second = decoder.feed(ordinaryPacket)
+
+        assertTrue(first.passthroughPackets.isEmpty())
+        assertEquals(HeartRateRawLoggingPolicy.ALLOW, second.rawLoggingPolicy)
+        assertEquals(2, second.passthroughPackets.size)
+        assertTrue(second.passthroughPackets[0].contentEquals(speculativePrefix))
+        assertTrue(second.passthroughPackets[1].contentEquals(ordinaryPacket))
     }
 
     @Test

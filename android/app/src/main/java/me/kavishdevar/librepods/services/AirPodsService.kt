@@ -4028,11 +4028,21 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                                 if (decoded.requiresTransportReset) {
                                     Log.w(TAG, "Heart-rate sensor transport requested a reset")
                                     if (finishAacpReader(lease, "invalid sensor transport")) {
-                                        requestAutomaticReconnect(
-                                            "heart_rate_transport_reset",
-                                            ensureAudioProfiles = false,
-                                            boundedControlRepair = true,
-                                        )
+                                        if (reconnectEpisodeGate
+                                                .tryConsumeHeartRateTransportReset()
+                                        ) {
+                                            requestAutomaticReconnect(
+                                                "heart_rate_transport_reset",
+                                                ensureAudioProfiles = false,
+                                                boundedControlRepair = true,
+                                            )
+                                        } else {
+                                            Log.w(
+                                                TAG,
+                                                "Heart-rate transport reset budget exhausted " +
+                                                    "for this presence episode",
+                                            )
+                                        }
                                     }
                                     return@launch
                                 }

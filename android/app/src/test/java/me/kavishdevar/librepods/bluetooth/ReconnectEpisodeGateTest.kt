@@ -62,6 +62,34 @@ class ReconnectEpisodeGateTest {
     }
 
     @Test
+    fun `heart rate transport resets remain bounded after successful reconnects`() {
+        val gate = ReconnectEpisodeGate(
+            maxControlReconnectAttempts = 1,
+            maxHeartRateTransportResets = 3,
+        )
+
+        repeat(3) {
+            assertEquals(true, gate.tryConsumeHeartRateTransportReset())
+            val permit = assertNotNull(gate.tryBeginControlReconnect())
+            gate.finishControlReconnect(permit, succeeded = true)
+        }
+
+        assertEquals(false, gate.tryConsumeHeartRateTransportReset())
+    }
+
+    @Test
+    fun `presence reset restores heart rate transport reset budget`() {
+        val gate = ReconnectEpisodeGate(maxHeartRateTransportResets = 1)
+
+        assertEquals(true, gate.tryConsumeHeartRateTransportReset())
+        assertEquals(false, gate.tryConsumeHeartRateTransportReset())
+
+        gate.reset()
+
+        assertEquals(true, gate.tryConsumeHeartRateTransportReset())
+    }
+
+    @Test
     fun `reset restores all budgets and invalidates stale permits`() {
         val gate = ReconnectEpisodeGate(maxControlReconnectAttempts = 1)
 

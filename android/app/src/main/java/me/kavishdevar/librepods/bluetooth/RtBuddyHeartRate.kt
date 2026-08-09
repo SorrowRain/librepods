@@ -103,6 +103,25 @@ internal class RtBuddyHeartRateDecoder(
             )
         }
 
+        if (carry.isNotEmpty() &&
+            carry.size < RTBUDDY_FRAME_PREFIX.size &&
+            !chunk.continuesPrefixAfter(carry)
+        ) {
+            val rejectedPrefix = carry
+            val suppressRawLogging = rejectedPrefix.isSensitiveCarry()
+            carry = ByteArray(0)
+            carryStartsAtPacketBoundary = true
+            val decoded = feed(chunk)
+            return decoded.copy(
+                rawLoggingPolicy = if (suppressRawLogging || decoded.suppressRawLogging) {
+                    HeartRateRawLoggingPolicy.SUPPRESS
+                } else {
+                    HeartRateRawLoggingPolicy.ALLOW
+                },
+                passthroughPackets = listOf(rejectedPrefix) + decoded.passthroughPackets,
+            )
+        }
+
         val hadSensitiveCarry = carry.isSensitiveCarry()
         val dataStartsAtPacketBoundary = carry.isEmpty() || carryStartsAtPacketBoundary
         val data = if (carry.isEmpty()) chunk else carry + chunk
@@ -470,6 +489,13 @@ internal class RtBuddyHeartRateDecoder(
     private fun ByteArray.unsignedByteAt(index: Int): Int = this[index].toInt().and(0xFF)
 
     private fun ByteArray.isSensitiveCarry(): Boolean = size >= MIN_SENSITIVE_PREFIX_LENGTH
+
+    private fun ByteArray.continuesPrefixAfter(partial: ByteArray): Boolean {
+        val bytesToCheck = minOf(size, RTBUDDY_FRAME_PREFIX.size - partial.size)
+        return (0 until bytesToCheck).all { index ->
+            this[index] == RTBUDDY_FRAME_PREFIX[partial.size + index]
+        }
+    }
 
     private fun <K> MutableMap<K, Int>.increment(key: K) {
         this[key] = getOrDefault(key, 0) + 1

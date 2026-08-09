@@ -20,6 +20,7 @@ internal class ReconnectEpisodeGate(
     private val maxInitialConnectAttempts: Int = 2,
     private val maxProfileRepairAttempts: Int = 2,
     private val maxControlReconnectAttempts: Int = 3,
+    private val maxHeartRateTransportResets: Int = 3,
 ) {
     private var generation = 0L
     private var initialConnectAttempts = 0
@@ -29,11 +30,13 @@ internal class ReconnectEpisodeGate(
     private var profileRepairInFlight = false
     private var controlReconnectAttempts = 0
     private var controlReconnectInFlight = false
+    private var heartRateTransportResets = 0
 
     init {
         require(maxInitialConnectAttempts > 0)
         require(maxProfileRepairAttempts > 0)
         require(maxControlReconnectAttempts > 0)
+        require(maxHeartRateTransportResets > 0)
     }
 
     @Synchronized
@@ -89,6 +92,14 @@ internal class ReconnectEpisodeGate(
         if (succeeded && controlReconnectAttempts > 0) controlReconnectAttempts--
     }
 
+    /** Bounds repeated malformed RTBuddy reconnects even when each socket reconnect succeeds. */
+    @Synchronized
+    fun tryConsumeHeartRateTransportReset(): Boolean {
+        if (heartRateTransportResets >= maxHeartRateTransportResets) return false
+        heartRateTransportResets++
+        return true
+    }
+
     @Synchronized
     fun isCurrent(expectedGeneration: Long): Boolean = generation == expectedGeneration
 
@@ -102,5 +113,6 @@ internal class ReconnectEpisodeGate(
         profileRepairInFlight = false
         controlReconnectAttempts = 0
         controlReconnectInFlight = false
+        heartRateTransportResets = 0
     }
 }
