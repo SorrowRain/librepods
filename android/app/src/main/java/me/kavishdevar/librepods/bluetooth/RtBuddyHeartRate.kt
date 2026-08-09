@@ -50,6 +50,18 @@ internal data class HeartRateDecodeResult(
         get() = rawLoggingPolicy == HeartRateRawLoggingPolicy.SUPPRESS
 }
 
+/** Keeps decoder carry private to one AACP reader and drops results if its lease turns stale. */
+internal class LeaseFencedRtBuddyHeartRateDecoder(
+    private val decoder: RtBuddyHeartRateDecoder,
+    private val leaseIsCurrent: () -> Boolean,
+) {
+    fun feed(chunk: ByteArray): HeartRateDecodeResult? {
+        if (!leaseIsCurrent()) return null
+        val decoded = decoder.feed(chunk)
+        return decoded.takeIf { leaseIsCurrent() }
+    }
+}
+
 /**
  * Reassembles bounded RTBuddy frames and extracts verified HEARTRATE SensorDataWX payloads.
  *

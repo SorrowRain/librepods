@@ -3,6 +3,7 @@ package me.kavishdevar.librepods.bluetooth
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class RtBuddyHeartRateDecoderTest {
@@ -340,6 +341,41 @@ class RtBuddyHeartRateDecoderTest {
         assertTrue(
             second.passthroughPackets.single().contentEquals(frame.copyOfRange(15, frame.size))
         )
+    }
+
+    @Test
+    fun `lease revocation after decode discards the whole result`() {
+        var leaseCheck = 0
+        val fenced = LeaseFencedRtBuddyHeartRateDecoder(
+            decoder = decoder(),
+            leaseIsCurrent = { ++leaseCheck == 1 },
+        )
+
+        assertNull(fenced.feed(heartRateFrame(bpm = 91)))
+        assertEquals(2, leaseCheck)
+    }
+
+    @Test
+    fun `fragment carry cannot cross reader lease instances`() {
+        val frame = heartRateFrame(bpm = 91)
+        val splitAt = frame.size / 2
+        var oldLeaseCurrent = true
+        val oldReader = LeaseFencedRtBuddyHeartRateDecoder(
+            decoder = decoder(),
+            leaseIsCurrent = { oldLeaseCurrent },
+        )
+        val newReader = LeaseFencedRtBuddyHeartRateDecoder(
+            decoder = decoder(),
+            leaseIsCurrent = { true },
+        )
+
+        assertTrue(oldReader.feed(frame.copyOfRange(0, splitAt))?.samples.orEmpty().isEmpty())
+        oldLeaseCurrent = false
+        val continuation = newReader.feed(frame.copyOfRange(splitAt, frame.size))
+
+        assertTrue(continuation?.samples.orEmpty().isEmpty())
+        assertEquals(1, continuation?.passthroughPackets?.size)
+        assertEquals(1, newReader.feed(frame)?.samples?.size)
     }
 
     @Test

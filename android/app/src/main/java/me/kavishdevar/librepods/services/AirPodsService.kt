@@ -106,6 +106,7 @@ import me.kavishdevar.librepods.bluetooth.ATTManagerv2
 import me.kavishdevar.librepods.bluetooth.BLEManager
 import me.kavishdevar.librepods.bluetooth.BluetoothConnectionManager
 import me.kavishdevar.librepods.bluetooth.HeartRateAacpTransport
+import me.kavishdevar.librepods.bluetooth.LeaseFencedRtBuddyHeartRateDecoder
 import me.kavishdevar.librepods.bluetooth.ReconnectEpisodeGate
 import me.kavishdevar.librepods.bluetooth.ReconnectLifecycleBegin
 import me.kavishdevar.librepods.bluetooth.ReconnectLifecycleGate
@@ -248,9 +249,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     )
     private val remoteDeviceGuardScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val heartRateTransport = HeartRateAacpTransport()
-    private val heartRateDecoder = RtBuddyHeartRateDecoder(
-        elapsedRealtimeMillis = SystemClock::elapsedRealtime,
-    )
     private lateinit var heartRateRuntime: HeartRateRuntimeCoordinator
     private lateinit var heartRatePreferences: SharedPreferences
     private lateinit var healthConnectHeartRateExporter: HealthConnectHeartRateExporter
@@ -1413,7 +1411,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             deviceKey = connectedDevice.address,
             epoch = lease.generation,
         )
-        heartRateDecoder.reset()
         heartRateSessionKey = key
         runBlocking { heartRateRuntime.installConnectionAndAwait(key) }
     }
@@ -1421,7 +1418,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private fun cleanupHeartRateSessionBeforeLeaseClose(lease: AacpSocketLease) {
         val key = currentHeartRateKeyFor(lease) ?: return
         runBlocking { heartRateRuntime.disconnectAndAwait(key) }
-        heartRateDecoder.reset()
         if (heartRateSessionKey?.matches(key) == true) heartRateSessionKey = null
     }
 
@@ -3921,6 +3917,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 runCatching { socket.close() }
                 return
             }
+            val leaseHeartRateDecoder = LeaseFencedRtBuddyHeartRateDecoder(
+                decoder = RtBuddyHeartRateDecoder(
+                    elapsedRealtimeMillis = SystemClock::elapsedRealtime,
+                ),
+                leaseIsCurrent = { BluetoothConnectionManager.isCurrent(lease) },
+            )
             socket.let {
                 aacpManager.sendPacket(aacpManager.createHandshakePacket(), lease)
                 aacpManager.sendSetFeatureFlagsPacket(lease)
@@ -4013,7 +4015,16 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                                     runCatching { socket.close() }
                                     return@launch
                                 }
-                                val decoded = heartRateDecoder.feed(data)
+                                val decoded = leaseHeartRateDecoder.feed(data) ?: run {
+                                    Log.d(TAG, "Discarding decoded data from stale AACP reader")
+                                    runCatching { socket.close() }
+                                    return@launch
+                                }
+                                if (!BluetoothConnectionManager.isCurrent(lease)) {
+                                    Log.d(TAG, "Discarding stale AACP reader result")
+                                    runCatching { socket.close() }
+                                    return@launch
+                                }
                                 if (decoded.requiresTransportReset) {
                                     Log.w(TAG, "Heart-rate sensor transport requested a reset")
                                     if (finishAacpReader(lease, "invalid sensor transport")) {
@@ -4466,7 +4477,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             healthConnectHeartRateExporter.closeAndAwait()
             heartRateRuntime.destroyAndAwait()
         }
-        heartRateDecoder.reset()
         heartRateSessionKey = null
         heartRateScope.cancel()
         aacpReaderScope.cancel()
