@@ -3230,13 +3230,28 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     @OptIn(ExperimentalCoroutinesApi::class)
     suspend fun testHeadGestures(): Boolean {
+        val detector = gestureDetector ?: return false
         return suspendCancellableCoroutine { continuation ->
-            gestureDetector?.startDetection(doNotStop = true) { accepted ->
-                if (continuation.isActive) {
-                    continuation.resume(accepted) { _, _, _ ->
-                        gestureDetector?.stopDetection()
+            continuation.invokeOnCancellation {
+                detector.stopDetection()
+            }
+            val started = detector.startDetection(
+                onUnavailable = {
+                    if (continuation.isActive) {
+                        continuation.resume(false) { _, _, _ -> detector.stopDetection() }
                     }
                 }
+            ) { accepted ->
+                if (continuation.isActive) {
+                    continuation.resume(accepted) { _, _, _ ->
+                        detector.stopDetection()
+                    }
+                }
+            }
+            if (!started && continuation.isActive) {
+                continuation.resume(false) { _, _, _ -> }
+            } else if (!continuation.isActive) {
+                detector.stopDetection()
             }
         }
     }
@@ -4459,6 +4474,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
         serviceShuttingDown = true
         suppressAutomaticReconnect()
+        gestureDetector?.stopDetection(doNotStop = true)
         remoteDeviceGuardHandler.removeCallbacks(remoteDeviceGuardTick)
         remoteDeviceGuardScope.cancel()
         runCatching {

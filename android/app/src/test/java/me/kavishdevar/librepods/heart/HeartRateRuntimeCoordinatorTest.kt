@@ -143,6 +143,36 @@ class HeartRateRuntimeCoordinatorTest {
     }
 
     @Test
+    fun `rejected gesture test does not survive while deferred UI tracking resumes`() = runBlocking {
+        val fixture = Fixture()
+        val key = key(epoch = 1L)
+        fixture.connectSupportedAndWorn(key)
+        fixture.coordinator.requestHeadTracking(key, HeadTrackingRequestSource.UI_SCREEN)
+        settle()
+
+        assertFalse(
+            fixture.coordinator.requestHeadTrackingImmediately(
+                key,
+                HeadTrackingRequestSource.GESTURE,
+            )
+        )
+        fixture.coordinator.setEnabledAndAwait(false)
+        settle()
+
+        assertEquals(
+            listOf("start-heart-1", "stop-heart-1", "start-head-1"),
+            fixture.sink.events,
+        )
+        assertTrue(fixture.coordinator.headTrackingActive.value)
+
+        fixture.coordinator.releaseHeadTracking(key, HeadTrackingRequestSource.UI_SCREEN)
+        settle()
+        assertEquals("stop-head-1", fixture.sink.events.last())
+        assertFalse(fixture.coordinator.headTrackingActive.value)
+        fixture.close()
+    }
+
+    @Test
     fun `gesture requiring immediate grant starts only when transport grants it`() = runBlocking {
         val fixture = Fixture()
         val key = key(epoch = 1L)

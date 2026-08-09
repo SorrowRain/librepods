@@ -24,6 +24,7 @@ import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -85,9 +86,13 @@ class GestureDetector(
 
     private val minConfidenceThreshold = 0.7
 
+    @Volatile
     private var isRunning = false
     private var detectionJob: Job? = null
     private var gestureDetectedCallback: ((Boolean) -> Unit)? = null
+    private var releaseHeadTrackingOnCompletion = false
+    private var suppressHeadTrackingRelease = false
+    private val lifecycleLock = Any()
 
     private var significantMotion = false
     private var lastSignificantMotionTime = 0L
@@ -97,28 +102,40 @@ class GestureDetector(
         while (verticalAvgBuffer.size < 3) verticalAvgBuffer.add(0.0)
     }
 
-    fun startDetection(doNotStop: Boolean = false, onGestureDetected: (Boolean) -> Unit) {
-        if (isRunning) return
+    fun startDetection(
+        doNotStop: Boolean = false,
+        onUnavailable: () -> Unit = {},
+        onGestureDetected: (Boolean) -> Unit,
+    ): Boolean {
+        synchronized(lifecycleLock) {
+            if (detectionJob != null) return false
 
-        Log.d(TAG, "Starting gesture detection...")
-        isRunning = true
-        gestureDetectedCallback = onGestureDetected
+            Log.d(TAG, "Starting gesture detection...")
+            isRunning = true
+            gestureDetectedCallback = onGestureDetected
+            releaseHeadTrackingOnCompletion = false
+            suppressHeadTrackingRelease = false
 
-        clearData()
+            clearData()
 
-        prevHorizontal = 0.0
-        prevVertical = 0.0
+            prevHorizontal = 0.0
+            prevVertical = 0.0
 
-        detectionJob = CoroutineScope(Dispatchers.Default).launch {
-            var headTrackingGranted = doNotStop
-            try {
+            val job = CoroutineScope(Dispatchers.Default).launch(start = CoroutineStart.LAZY) {
+                var headTrackingGranted = doNotStop
                 if (!doNotStop) {
                     headTrackingGranted = airPodsService.requestGestureHeadTracking()
+                    if (headTrackingGranted) {
+                        synchronized(lifecycleLock) {
+                            releaseHeadTrackingOnCompletion = true
+                        }
+                    }
                     Log.d(TAG, "Head tracking grant available: $headTrackingGranted")
                 }
                 if (!headTrackingGranted || !isRunning) {
-                    isRunning = false
-                    gestureDetectedCallback = null
+                    if (!headTrackingGranted && isRunning) {
+                        withContext(Dispatchers.Main) { onUnavailable() }
+                    }
                     return@launch
                 }
 
@@ -136,24 +153,40 @@ class GestureDetector(
                         break
                     }
                 }
-            } finally {
-                if (!doNotStop && headTrackingGranted && !isRunning) {
+            }
+            job.invokeOnCompletion {
+                val shouldReleaseHeadTracking = synchronized(lifecycleLock) {
+                    if (detectionJob === job) {
+                        detectionJob = null
+                    }
+                    val shouldRelease =
+                        releaseHeadTrackingOnCompletion && !suppressHeadTrackingRelease
+                    releaseHeadTrackingOnCompletion = false
+                    suppressHeadTrackingRelease = false
+                    isRunning = false
+                    gestureDetectedCallback = null
+                    shouldRelease
+                }
+                if (shouldReleaseHeadTracking) {
                     airPodsService.releaseGestureHeadTracking()
                 }
             }
+            detectionJob = job
+            job.start()
         }
+        return true
     }
+
     fun stopDetection(doNotStop: Boolean = false) {
-        if (!isRunning) return
-
-        Log.d(TAG, "Stopping gesture detection")
-        isRunning = false
-
-        if (!doNotStop) airPodsService.releaseGestureHeadTracking()
-
-        detectionJob?.cancel()
-        detectionJob = null
-        gestureDetectedCallback = null
+        val job = synchronized(lifecycleLock) {
+            val currentJob = detectionJob ?: return
+            Log.d(TAG, "Stopping gesture detection")
+            if (doNotStop) suppressHeadTrackingRelease = true
+            isRunning = false
+            gestureDetectedCallback = null
+            currentJob
+        }
+        job.cancel()
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
