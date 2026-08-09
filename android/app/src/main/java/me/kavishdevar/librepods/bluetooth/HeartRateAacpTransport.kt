@@ -98,10 +98,30 @@ internal object HeartRateAacpFrames {
 }
 
 /**
+ * Serializes the final current-acquisition check with one synchronous socket write.
+ *
+ * START and STOP share this gate. If START enters first, STOP is guaranteed to follow it. If STOP
+ * enters first, a queued stale START observes its invalidated acquisition before it can write.
+ */
+internal class HeartRateAacpWriteGate {
+    private val monitor = Any()
+
+    fun writeIfCurrent(
+        isCurrent: () -> Boolean,
+        write: () -> Boolean,
+    ): Boolean = synchronized(monitor) {
+        if (!isCurrent()) return@synchronized false
+        write()
+    }
+}
+
+/**
  * Writes only heart-rate frames and never logs packet bytes. Every write is tied to the exact
  * socket lease and repeats the current-lease check immediately before the manager's atomic write.
  */
-internal class HeartRateAacpTransport {
+internal class HeartRateAacpTransport(
+    private val writeGate: HeartRateAacpWriteGate = HeartRateAacpWriteGate(),
+) {
     suspend fun start(
         lease: AacpSocketLease,
         acquisitionIsCurrent: () -> Boolean,
@@ -128,20 +148,23 @@ internal class HeartRateAacpTransport {
         packet: ByteArray,
         lease: AacpSocketLease,
         acquisitionIsCurrent: () -> Boolean,
-    ): Boolean {
-        if (!acquisitionIsCurrent()) return false
-        if (!BluetoothConnectionManager.isCurrent(lease)) return false
-        return try {
-            BluetoothConnectionManager.writeAacpPacket(packet, lease).also { sent ->
-                if (!sent) {
-                    Log.w(TAG, "Heart-rate AACP write was rejected at ${stage ?: "stop"}")
+    ): Boolean = writeGate.writeIfCurrent(
+        isCurrent = {
+            acquisitionIsCurrent() && BluetoothConnectionManager.isCurrent(lease)
+        },
+        write = {
+            try {
+                BluetoothConnectionManager.writeAacpPacket(packet, lease).also { sent ->
+                    if (!sent) {
+                        Log.w(TAG, "Heart-rate AACP write was rejected at ${stage ?: "stop"}")
+                    }
                 }
+            } catch (error: Exception) {
+                Log.w(TAG, "Heart-rate AACP write failed at ${stage ?: "stop"}", error)
+                false
             }
-        } catch (error: Exception) {
-            Log.w(TAG, "Heart-rate AACP write failed at ${stage ?: "stop"}", error)
-            false
-        }
-    }
+        },
+    )
 
     private companion object {
         const val TAG = "HeartRateTransport"
