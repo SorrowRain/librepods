@@ -105,10 +105,12 @@ import me.kavishdevar.librepods.bluetooth.ATTHandles
 import me.kavishdevar.librepods.bluetooth.ATTManagerv2
 import me.kavishdevar.librepods.bluetooth.BLEManager
 import me.kavishdevar.librepods.bluetooth.BluetoothConnectionManager
+import me.kavishdevar.librepods.bluetooth.HeartRateAacpTransport
 import me.kavishdevar.librepods.bluetooth.ReconnectEpisodeGate
 import me.kavishdevar.librepods.bluetooth.ReconnectLifecycleBegin
 import me.kavishdevar.librepods.bluetooth.ReconnectLifecycleGate
 import me.kavishdevar.librepods.bluetooth.ReconnectLifecycleToken
+import me.kavishdevar.librepods.bluetooth.RtBuddyHeartRateDecoder
 import me.kavishdevar.librepods.bluetooth.createBluetoothSocket
 import me.kavishdevar.librepods.data.AirPodsInstance
 import me.kavishdevar.librepods.data.AirPodsModels
@@ -131,6 +133,16 @@ import me.kavishdevar.librepods.data.RemoteDeviceAudioSourceType
 import me.kavishdevar.librepods.data.StemAction
 import me.kavishdevar.librepods.data.XposedRemotePrefProvider
 import me.kavishdevar.librepods.data.isHeadTrackingData
+import me.kavishdevar.librepods.heart.HeadTrackingRequestSource
+import me.kavishdevar.librepods.heart.HeartRateMeasurement
+import me.kavishdevar.librepods.heart.HeartRateRuntimeCoordinator
+import me.kavishdevar.librepods.heart.HeartRateRuntimeSink
+import me.kavishdevar.librepods.heart.HeartRateUiState
+import me.kavishdevar.librepods.heart.HeartRateWearState
+import me.kavishdevar.librepods.heart.HrmAcquisitionToken
+import me.kavishdevar.librepods.heart.HrmSessionKey
+import me.kavishdevar.librepods.heart.OneShotSensorCleanup
+import me.kavishdevar.librepods.heart.SensorResourceOwner
 import me.kavishdevar.librepods.presentation.overlays.IslandWindow
 import me.kavishdevar.librepods.presentation.overlays.PopupWindow
 import me.kavishdevar.librepods.presentation.widgets.BatteryWidget
@@ -228,7 +240,18 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private lateinit var audioManager: AudioManager
     private val audioFeatureScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val aacpReaderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val heartRateScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO.limitedParallelism(1)
+    )
     private val remoteDeviceGuardScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val heartRateTransport = HeartRateAacpTransport()
+    private val heartRateDecoder = RtBuddyHeartRateDecoder(
+        elapsedRealtimeMillis = SystemClock::elapsedRealtime,
+    )
+    private lateinit var heartRateRuntime: HeartRateRuntimeCoordinator
+    private lateinit var heartRatePreferences: SharedPreferences
+    @Volatile
+    private var heartRateSessionKey: HrmSessionKey? = null
     private data class ConnectionNotificationContent(
         val title: String?,
         val text: String,
@@ -367,6 +390,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     lateinit var bleManager: BLEManager
 
     companion object {
+        private const val HEART_RATE_MONITORING_ENABLED = "heart_rate_monitoring_enabled"
+
         init {
             System.loadLibrary("bluetooth_socket")
         }
@@ -1250,6 +1275,114 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }.getOrNull()
     }
 
+    private fun initializeHeartRateRuntime() {
+        heartRatePreferences = getSharedPreferences("heart_rate_private", MODE_PRIVATE)
+        heartRateRuntime = HeartRateRuntimeCoordinator(
+            scope = heartRateScope,
+            elapsedRealtimeMillis = SystemClock::elapsedRealtime,
+            sink = object : HeartRateRuntimeSink {
+                override suspend fun startHeartRate(
+                    acquisition: HrmAcquisitionToken,
+                    acquisitionIsCurrent: () -> Boolean,
+                ): Boolean {
+                    val lease = currentLeaseFor(acquisition.key) ?: return false
+                    return heartRateTransport.start(lease) {
+                        acquisitionIsCurrent() &&
+                            heartRateRuntime.isAcquisitionCurrent(acquisition)
+                    }
+                }
+
+                override fun stopHeartRate(
+                    acquisition: HrmAcquisitionToken,
+                    cleanup: OneShotSensorCleanup,
+                ): Boolean {
+                    val lease = currentLeaseFor(acquisition.key) ?: return false
+                    return heartRateTransport.stop(lease, cleanup::consume)
+                }
+
+                override fun startHeadTracking(
+                    owner: SensorResourceOwner,
+                    ownerIsCurrent: () -> Boolean,
+                ): Boolean {
+                    if (!ownerIsCurrent()) return false
+                    val lease = currentLeaseFor(owner.connection) ?: return false
+                    return startHeadTrackingTransport(lease)
+                }
+
+                override fun stopHeadTracking(
+                    owner: SensorResourceOwner,
+                    cleanup: OneShotSensorCleanup,
+                ) {
+                    val lease = currentLeaseFor(owner.connection) ?: return
+                    if (!cleanup.consume()) return
+                    stopHeadTrackingTransport(lease)
+                }
+
+                override fun publishMeasurement(measurement: HeartRateMeasurement) {
+                    onValidatedHeartRateMeasurement(measurement)
+                }
+            },
+        )
+        runBlocking {
+            heartRateRuntime.setEnabledAndAwait(
+                heartRatePreferences.getBoolean(HEART_RATE_MONITORING_ENABLED, false)
+            )
+        }
+    }
+
+    val heartRateState: StateFlow<HeartRateUiState>
+        get() = heartRateRuntime.uiState
+
+    val headTrackingActiveState: StateFlow<Boolean>
+        get() = heartRateRuntime.headTrackingActive
+
+    fun setHeartRateMonitoringEnabled(enabled: Boolean) {
+        heartRatePreferences.edit { putBoolean(HEART_RATE_MONITORING_ENABLED, enabled) }
+        heartRateRuntime.setEnabled(enabled)
+    }
+
+    fun retryHeartRateMonitoring() {
+        heartRateRuntime.retry()
+    }
+
+    private fun onValidatedHeartRateMeasurement(measurement: HeartRateMeasurement) {
+        // Health Connect export consumes this callback after explicit permission is confirmed.
+    }
+
+    private fun currentLeaseFor(key: HrmSessionKey): AacpSocketLease? =
+        BluetoothConnectionManager.currentAacpSocketLease()?.takeIf { lease ->
+            lease.socket === key.socketIdentity &&
+                lease.generation == key.generation &&
+                BluetoothConnectionManager.isCurrent(lease)
+        }
+
+    private fun currentHeartRateKeyFor(lease: AacpSocketLease): HrmSessionKey? =
+        heartRateSessionKey?.takeIf { key ->
+            key.socketIdentity === lease.socket && key.generation == lease.generation
+        }
+
+    private fun installHeartRateSession(
+        lease: AacpSocketLease,
+        connectedDevice: BluetoothDevice,
+    ) {
+        val key = HrmSessionKey(
+            socketIdentity = lease.socket,
+            generation = lease.generation,
+            deviceKey = connectedDevice.address,
+            epoch = lease.generation,
+        )
+        heartRateDecoder.reset()
+        heartRateSessionKey = key
+        runBlocking { heartRateRuntime.installConnectionAndAwait(key) }
+    }
+
+    private fun cleanupHeartRateSessionBeforeLeaseClose(lease: AacpSocketLease) {
+        val key = currentHeartRateKeyFor(lease) ?: return
+        runBlocking { heartRateRuntime.disconnectAndAwait(key) }
+        heartRateDecoder.reset()
+        if (heartRateSessionKey?.matches(key) == true) heartRateSessionKey = null
+    }
+
 
     @SuppressLint("MissingPermission", "UnspecifiedRegisterReceiverFlag", "HardwareIds")
     override fun onCreate() {
@@ -1268,6 +1401,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
         aacpManager = AACPManager()
         initializeAACPManagerCallback()
+        initializeHeartRateRuntime()
 
         attManager = ATTManagerv2()
 
@@ -1756,7 +1890,25 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
             }
 
-            override fun onEarDetectionReceived(earDetection: ByteArray) {
+            override fun onEarDetectionReceived(
+                earDetection: ByteArray,
+                expectedLease: AacpSocketLease,
+            ) {
+                if (!BluetoothConnectionManager.isCurrent(expectedLease)) return
+                val heartRateKey = currentHeartRateKeyFor(expectedLease)
+                if (heartRateKey != null && earDetection.size >= 2) {
+                    val wearBytes = earDetection.copyOfRange(
+                        earDetection.size - 2,
+                        earDetection.size,
+                    )
+                    heartRateRuntime.updateWear(
+                        heartRateKey,
+                        HeartRateWearState(
+                            leftWorn = wearBytes[0] == 0x00.toByte(),
+                            rightWorn = wearBytes[1] == 0x00.toByte(),
+                        ),
+                    )
+                }
                 sendBroadcast(Intent(AirPodsNotifications.EAR_DETECTION_DATA).apply {
                     val list = earDetectionNotification.status
                     val bytes = ByteArray(2)
@@ -1856,7 +2008,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 Log.d(TAG, "Ignoring legacy Smart Routing UI request from $sender")
             }
 
-            override fun onDeviceInformationReceived(deviceInformation: AACPManager.Companion.AirPodsInformation) {
+            override fun onDeviceInformationReceived(
+                deviceInformation: AACPManager.Companion.AirPodsInformation,
+                expectedLease: AacpSocketLease,
+            ) {
+                if (!BluetoothConnectionManager.isCurrent(expectedLease)) return
                 Log.d(
                     "AirPodsParser",
                     "Device Information: name: ${deviceInformation.name}, modelNumber: ${deviceInformation.modelNumber}, manufacturer: ${deviceInformation.manufacturer}, serialNumber: ${deviceInformation.serialNumber}, version1: ${deviceInformation.version1}, version2: ${deviceInformation.version2}, hardwareRevision: ${deviceInformation.hardwareRevision}, updaterIdentifier: ${deviceInformation.updaterIdentifier}, leftSerialNumber: ${deviceInformation.leftSerialNumber}, rightSerialNumber: ${deviceInformation.rightSerialNumber}, version3: ${deviceInformation.version3}"
@@ -1889,6 +2045,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 config.airpodsUpdaterIdentifier = deviceInformation.updaterIdentifier
 
                 val model = AirPodsModels.getModelByModelNumber(config.airpodsModelNumber)
+                currentHeartRateKeyFor(expectedLease)?.let { heartRateKey ->
+                    heartRateRuntime.confirmDeviceInformation(
+                        key = heartRateKey,
+                        modelNumber = deviceInformation.modelNumber,
+                        modelCapabilities = model?.capabilities.orEmpty(),
+                    )
+                }
                 if (model != null) {
                     airpodsInstance = AirPodsInstance(
                         name = config.airpodsName,
@@ -1916,7 +2079,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             }
 
             @SuppressLint("NewApi")
-            override fun onHeadTrackingReceived(headTracking: ByteArray) {
+            override fun onHeadTrackingReceived(
+                headTracking: ByteArray,
+                expectedLease: AacpSocketLease,
+            ) {
+                if (!BluetoothConnectionManager.isCurrent(expectedLease)) return
                 if (isHeadTrackingActive) {
                     HeadTracking.processPacket(headTracking)?.let(spatialHeadTrackerBridge::submit)
                     processHeadTrackingData(headTracking)
@@ -3012,7 +3179,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         if (isInCall) return
         if (config.headGestures) {
             initGestureDetector()
-            startHeadTracking()
             gestureDetector?.startDetection { accepted ->
                 if (accepted) {
                     answerCall()
@@ -3548,6 +3714,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             aacpSessionJob?.cancel()
                             aacpDelayedRefreshJob?.cancel()
                             stopMediaInformationReporter()
+                            BluetoothConnectionManager.currentAacpSocketLease()?.let(
+                                ::cleanupHeartRateSessionBeforeLeaseClose
+                            )
                             this@AirPodsService.device = device
                             socketGeneration =
                                 BluetoothConnectionManager.installAacpSocket(socket)
@@ -3569,6 +3738,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             runCatching { socket.close() }
                             return@withTimeout
                         }
+                        installHeartRateSession(installedLease, device)
                         val useVendorAttSocket = XposedRemotePrefProvider.create().getBoolean(
                             "vendor_id_hook", false
                         ) && sharedPreferences.getBoolean("vendor_att_socket", false)
@@ -3762,7 +3932,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         // service was stopped, so query again once AACP is usable.
                         refreshCurrentA2dpPlaybackState("AACP connected")
                     } else {
-                        startHeadTracking(lease)
+                        requestHeadTracking(HeadTrackingRequestSource.BOOTSTRAP, lease)
                     }
                     aacpDelayedRefreshJob = aacpReaderScope.launch {
                         delay(5_000L)
@@ -3776,7 +3946,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             AACPManager.Companion.ProximityKeyType.IRK.value,
                             lease,
                         )
-                        stopHeadTracking(expectedLease = lease)
+                        releaseHeadTracking(HeadTrackingRequestSource.BOOTSTRAP, lease)
                     }
 
                     sendBroadcast(
@@ -3794,26 +3964,56 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         try {
                             val buffer = ByteArray(1024)
                             val bytesRead = it.inputStream.read(buffer)
-                            var data: ByteArray
                             if (bytesRead > 0) {
-                                data = buffer.copyOfRange(0, bytesRead)
-                                val formattedHex = data.joinToString(" ") { "%02X".format(it) }
+                                val data = buffer.copyOfRange(0, bytesRead)
                                 if (!BluetoothConnectionManager.isCurrent(lease)) {
                                     Log.d(TAG, "Ignoring packet from stale AACP reader")
                                     runCatching { socket.close() }
                                     return@launch
                                 }
-                                aacpManager.receivePacket(data, lease)
+                                val decoded = heartRateDecoder.feed(data)
+                                if (decoded.requiresTransportReset) {
+                                    Log.w(TAG, "Heart-rate sensor transport requested a reset")
+                                    if (finishAacpReader(lease, "invalid sensor transport")) {
+                                        requestAutomaticReconnect(
+                                            "heart_rate_transport_reset",
+                                            ensureAudioProfiles = false,
+                                            boundedControlRepair = true,
+                                        )
+                                    }
+                                    return@launch
+                                }
 
-                                sendBroadcast(Intent(AirPodsNotifications.AIRPODS_DATA).apply {
-                                    putExtra("data", data)
-                                    setPackage(packageName)
-                                })
-//                                    CrossDevice.sendReceivedPacket(data)
+                                val heartRateKey = currentHeartRateKeyFor(lease)
+                                if (heartRateKey != null) {
+                                    decoded.samples.forEach { sample ->
+                                        heartRateRuntime.acceptSample(heartRateKey, sample)
+                                    }
+                                }
 
-                                if (!isHeadTrackingData(data)) {
-                                    Log.d("AirPodsData", "Data received: $formattedHex")
-                                    logPacket(data, "AirPods")
+                                decoded.passthroughPackets.forEach { packet ->
+                                    aacpManager.receivePacket(
+                                        packet = packet,
+                                        expectedLease = lease,
+                                        allowRawLogging = !decoded.suppressRawLogging,
+                                    )
+
+                                    sendBroadcast(
+                                        Intent(AirPodsNotifications.AIRPODS_DATA).apply {
+                                            putExtra("data", packet)
+                                            setPackage(packageName)
+                                        }
+                                    )
+//                                    CrossDevice.sendReceivedPacket(packet)
+
+                                    if (!decoded.suppressRawLogging &&
+                                        !isHeadTrackingData(packet)
+                                    ) {
+                                        val formattedHex =
+                                            packet.joinToString(" ") { "%02X".format(it) }
+                                        Log.d("AirPodsData", "Data received: $formattedHex")
+                                        logPacket(packet, "AirPods")
+                                    }
                                 }
 
                             } else if (bytesRead == -1) {
@@ -3872,6 +4072,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         reason: String,
     ): Boolean {
         val closedCurrentSession = synchronized(connectionLifecycleLock) {
+            if (!BluetoothConnectionManager.isCurrent(expectedLease)) {
+                return@synchronized false
+            }
+            cleanupHeartRateSessionBeforeLeaseClose(expectedLease)
             if (!BluetoothConnectionManager.closeAacpGeneration(
                     expectedLease.socket,
                     expectedLease.generation,
@@ -3917,6 +4121,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         val disconnectedCurrentSession = synchronized(connectionLifecycleLock) {
             val currentLease = BluetoothConnectionManager.currentAacpSocketLease()
                 ?: return@synchronized false
+            cleanupHeartRateSessionBeforeLeaseClose(currentLease)
             if (!BluetoothConnectionManager.closeAacpGeneration(
                     currentLease.socket,
                     currentLease.generation,
@@ -4208,12 +4413,17 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             aacpDelayedRefreshJob?.cancel()
             stopMediaInformationReporter()
             val currentLease = BluetoothConnectionManager.currentAacpSocketLease()
+            currentLease?.let(::cleanupHeartRateSessionBeforeLeaseClose)
             BluetoothConnectionManager.invalidateAacpSocket()
             BluetoothConnectionManager.invalidateAttSocket()
             runCatching { pendingAacpSocket?.close() }
             pendingAacpSocket = null
             aacpManager.disconnected(currentLease)
         }
+        runBlocking { heartRateRuntime.destroyAndAwait() }
+        heartRateDecoder.reset()
+        heartRateSessionKey = null
+        heartRateScope.cancel()
         aacpReaderScope.cancel()
         stopAudioPlaybackMonitor()
         ServiceManager.setService(null)
@@ -4609,7 +4819,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             Log.i(TAG, "Starting spatial tracking: $reason")
             // Android can select a head-tracking mode only after the matching
             // dynamic sensor exists, so create UHID before changing the mode.
-            startHeadTracking()
+            requestHeadTracking(HeadTrackingRequestSource.SPATIAL_AUDIO)
             audioFeatureScope.launch(Dispatchers.IO) {
                 spatialAudioTransitionMutex.withLock {
                     if (transitionId != spatialAudioTransitionId) return@withLock
@@ -4641,7 +4851,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             return@withLock
                         }
                         withContext(Dispatchers.Main) {
-                            startHeadTracking()
+                            requestHeadTracking(HeadTrackingRequestSource.SPATIAL_AUDIO)
                         }
                         // Give the HID raw sensor service time to publish the
                         // replacement handle before asking AudioService again.
@@ -4682,7 +4892,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     )
                     withContext(Dispatchers.Main) {
                         if (transitionId == spatialAudioTransitionId && !shouldRunSpatialAudio()) {
-                            stopHeadTracking(force = true)
+                            releaseHeadTracking(HeadTrackingRequestSource.SPATIAL_AUDIO)
                         }
                     }
                 }
@@ -4690,8 +4900,46 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }
     }
 
-    fun startHeadTracking(expectedLease: AacpSocketLease? = null) {
-        isHeadTrackingActive = true
+    fun startHeadTracking(expectedLease: AacpSocketLease? = null): Boolean =
+        requestHeadTracking(HeadTrackingRequestSource.UI_SCREEN, expectedLease)
+
+    fun stopHeadTracking(
+        force: Boolean = false,
+        expectedLease: AacpSocketLease? = null,
+    ): Boolean = releaseHeadTracking(HeadTrackingRequestSource.UI_SCREEN, expectedLease)
+
+    fun requestGestureHeadTracking(): Boolean =
+        requestHeadTracking(HeadTrackingRequestSource.GESTURE)
+
+    fun releaseGestureHeadTracking(): Boolean =
+        releaseHeadTracking(HeadTrackingRequestSource.GESTURE)
+
+    private fun requestHeadTracking(
+        source: HeadTrackingRequestSource,
+        expectedLease: AacpSocketLease? = null,
+    ): Boolean {
+        val lease = expectedLease ?: BluetoothConnectionManager.currentAacpSocketLease()
+            ?: return false
+        if (!BluetoothConnectionManager.isCurrent(lease)) return false
+        val key = currentHeartRateKeyFor(lease) ?: return false
+        heartRateRuntime.requestHeadTracking(key, source)
+        return true
+    }
+
+    private fun releaseHeadTracking(
+        source: HeadTrackingRequestSource,
+        expectedLease: AacpSocketLease? = null,
+    ): Boolean {
+        val lease = expectedLease ?: BluetoothConnectionManager.currentAacpSocketLease()
+            ?: return false
+        if (!BluetoothConnectionManager.isCurrent(lease)) return false
+        val key = currentHeartRateKeyFor(lease) ?: return false
+        heartRateRuntime.releaseHeadTracking(key, source)
+        return true
+    }
+
+    private fun startHeadTrackingTransport(expectedLease: AacpSocketLease): Boolean {
+        if (!BluetoothConnectionManager.isCurrent(expectedLease)) return false
         val useAlternatePackets =
             sharedPreferences.getBoolean("use_alternate_head_tracking_packets", true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && aacpManager.getControlCommandStatus(
@@ -4702,65 +4950,44 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         } else {
             Log.d(TAG, "Already own the connection; starting head tracking")
         }
-        if (useAlternatePackets) {
-            if (expectedLease == null) {
-                aacpManager.sendDataPacket(aacpManager.createAlternateStartHeadTrackingPacket())
-            } else {
-                aacpManager.sendDataPacket(
-                    aacpManager.createAlternateStartHeadTrackingPacket(),
-                    expectedLease,
-                )
-            }
+        val sent = if (useAlternatePackets) {
+            aacpManager.sendDataPacket(
+                aacpManager.createAlternateStartHeadTrackingPacket(),
+                expectedLease,
+            )
         } else {
-            if (expectedLease == null) {
-                aacpManager.sendStartHeadTracking()
-            } else {
-                aacpManager.sendStartHeadTracking(expectedLease)
-            }
+            aacpManager.sendStartHeadTracking(expectedLease)
         }
+        if (!sent) return false
+        isHeadTrackingActive = true
         HeadTracking.reset()
         if (shouldRunSpatialAudio()) {
             val trackerMac = device?.address
-                ?: macAddress.takeIf { it.isNotBlank() }
-                ?: sharedPreferences.getString("mac_address", null)
             if (trackerMac == null) {
                 Log.e(TAG, "Cannot start spatial head tracker: no AirPods Bluetooth address")
             } else {
-                Log.d(TAG, "Starting spatial head tracker for $trackerMac")
+                Log.d(TAG, "Starting spatial head tracker")
                 spatialHeadTrackerBridge.start(trackerMac)
             }
         }
+        return true
     }
 
-    fun stopHeadTracking(
-        force: Boolean = false,
-        expectedLease: AacpSocketLease? = null,
-    ) {
-        if (!force && shouldRunSpatialAudio()) {
-            Log.d(TAG, "Keeping head tracking active for spatial audio")
-            return
-        }
+    private fun stopHeadTrackingTransport(expectedLease: AacpSocketLease): Boolean {
         val useAlternatePackets =
             sharedPreferences.getBoolean("use_alternate_head_tracking_packets", true)
-        if (useAlternatePackets) {
-            if (expectedLease == null) {
-                aacpManager.sendDataPacket(aacpManager.createAlternateStopHeadTrackingPacket())
-            } else {
-                aacpManager.sendDataPacket(
-                    aacpManager.createAlternateStopHeadTrackingPacket(),
-                    expectedLease,
-                )
-            }
+        val sent = if (useAlternatePackets) {
+            aacpManager.sendDataPacket(
+                aacpManager.createAlternateStopHeadTrackingPacket(),
+                expectedLease,
+            )
         } else {
-            if (expectedLease == null) {
-                aacpManager.sendStopHeadTracking()
-            } else {
-                aacpManager.sendStopHeadTracking(expectedLease)
-            }
+            aacpManager.sendStopHeadTracking(expectedLease)
         }
         isHeadTrackingActive = false
         spatialHeadTrackerBridge.stop()
         gestureDetector?.stopDetection(doNotStop = true)
+        return sent
     }
 
     @SuppressLint("MissingPermission")

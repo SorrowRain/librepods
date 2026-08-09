@@ -272,11 +272,20 @@ class AACPManager {
 
     interface PacketCallback {
         fun onBatteryInfoReceived(batteryInfo: ByteArray)
-        fun onEarDetectionReceived(earDetection: ByteArray)
+        fun onEarDetectionReceived(
+            earDetection: ByteArray,
+            expectedLease: AacpSocketLease,
+        )
         fun onConversationAwarenessReceived(conversationAwareness: ByteArray)
         fun onControlCommandReceived(controlCommand: ByteArray)
-        fun onDeviceInformationReceived(deviceInformation: AirPodsInformation)
-        fun onHeadTrackingReceived(headTracking: ByteArray)
+        fun onDeviceInformationReceived(
+            deviceInformation: AirPodsInformation,
+            expectedLease: AacpSocketLease,
+        )
+        fun onHeadTrackingReceived(
+            headTracking: ByteArray,
+            expectedLease: AacpSocketLease,
+        )
         fun onUnknownPacketReceived(packet: ByteArray)
         fun onProximityKeysReceived(proximityKeys: ByteArray)
         fun onStemPressReceived(stemPress: ByteArray, expectedLease: AacpSocketLease)
@@ -478,24 +487,34 @@ class AACPManager {
     fun receivePacket(
         packet: ByteArray,
         expectedLease: AacpSocketLease,
+        allowRawLogging: Boolean = true,
     ) {
         if (!BluetoothConnectionManager.isCurrent(expectedLease)) {
             Log.d(TAG, "Ignoring packet from a stale AACP socket")
             return
         }
-        if (!packet.toHexString().startsWith("04000400")) {
-            Log.w(
-                TAG, "Received packet does not start with expected header: ${
-                packet.joinToString(" ") {
-                    "%02X".format(it)
-                }
-            }")
+        if (packet.size < 4 || !packet.copyOfRange(0, 4).contentEquals(HEADER_BYTES)) {
+            if (allowRawLogging) {
+                Log.w(
+                    TAG, "Received packet does not start with expected header: ${
+                    packet.joinToString(" ") {
+                        "%02X".format(it)
+                    }
+                }")
+            } else {
+                Log.w(TAG, "Received redacted packet without the expected AACP header")
+            }
             return
         }
         if (packet.size < 6) {
-            Log.w(
-                TAG, "Received packet too short: ${packet.joinToString(" ") { "%02X".format(it) }}"
-            )
+            if (allowRawLogging) {
+                Log.w(
+                    TAG,
+                    "Received packet too short: ${packet.joinToString(" ") { "%02X".format(it) }}",
+                )
+            } else {
+                Log.w(TAG, "Received redacted packet that was too short")
+            }
             return
         }
 
@@ -553,7 +572,7 @@ class AACPManager {
             }
 
             Opcodes.EAR_DETECTION -> {
-                callback?.onEarDetectionReceived(packet)
+                callback?.onEarDetectionReceived(packet, expectedLease)
             }
 
             Opcodes.CONVERSATION_AWARENESS -> {
@@ -562,15 +581,19 @@ class AACPManager {
 
             Opcodes.HEADTRACKING -> {
                 if (packet.size < 70) {
-                    Log.w(
-                        TAG, "Received HEADTRACKING packet too short: ${
-                        packet.joinToString(" ") {
-                            "%02X".format(it)
-                        }
-                    }")
+                    if (allowRawLogging) {
+                        Log.w(
+                            TAG, "Received HEADTRACKING packet too short: ${
+                            packet.joinToString(" ") {
+                                "%02X".format(it)
+                            }
+                        }")
+                    } else {
+                        Log.w(TAG, "Received redacted HEADTRACKING packet that was too short")
+                    }
                     return
                 }
-                callback?.onHeadTrackingReceived(packet)
+                callback?.onHeadTrackingReceived(packet, expectedLease)
             }
 
             Opcodes.PROXIMITY_KEYS_RSP -> {
@@ -701,11 +724,15 @@ class AACPManager {
             Opcodes.INFORMATION -> {
                 Log.d(TAG, "Parsing Information Packet")
                 val information = parseInformationPacket(packet)
-                callback?.onDeviceInformationReceived(information)
+                callback?.onDeviceInformationReceived(information, expectedLease)
             }
 
             Opcodes.CUSTOM_EQ -> {
-                Log.d(TAG, "Parsing CUSTOM_EQ: ${packet.toHexString()}")
+                if (allowRawLogging) {
+                    Log.d(TAG, "Parsing CUSTOM_EQ: ${packet.toHexString()}")
+                } else {
+                    Log.d(TAG, "Parsing redacted CUSTOM_EQ packet")
+                }
                 customEq = parseCustomEqPacket(packet)
                 customEqCallback?.invoke(customEq)
                 callback?.onCustomEqReceived(customEq)
@@ -713,7 +740,7 @@ class AACPManager {
 
             else -> {
                 Log.d(TAG, "Unhandled opcode received: ${opcode.toHexString()}")
-                callback?.onUnknownPacketReceived(packet)
+                if (allowRawLogging) callback?.onUnknownPacketReceived(packet)
             }
         }
     }
