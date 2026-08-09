@@ -43,7 +43,7 @@ LibrePods allows you to use AirPods features that are exclusive to Apple devices
 > [GNU GPL v3 or later](LICENSE), and matching source is available from each release tag.
 > It is not affiliated with or endorsed by the original maintainers.
 
-This fork includes a HyperOS-focused Android build (`v1.0.2-remote-guard.1`) for
+This fork includes a HyperOS-focused Android build (`v1.0.2-heart-rate.1`) for
 AirPods connected to an Android phone and one other device at the same time.
 
 ## Phase 1 routing policy
@@ -93,7 +93,7 @@ Apple device** option.
 | <details><summary>Other accessibility configs (click to expand)</summary><ul><li>Press speed</li><li>Press and Hold duration</li><li>Noise Cancellation with single AirPod</li><li>Volume control on swipe</li><li>Volume swipe speed</li></ul></details>       | 🔴     | ✅       |
 | <details><summary>Other general configs</summary><ul><li>Press and Hold to cycle between listening modes/invoke digital assistant (invoking digital assistant needs a recent firmware)</li><li>Configure call controls</li><li>Personalized volume</li><li>Loud Sound Reduction (needs <a href="#vendorid-spoofing">VendorID spoofing</a>)</li><li>Microphone side</li><li>Pause media when falling asleep (needs a recent firmware)</li><li>Enable <code>Off listening mode</code> to switch to <code>Off</code></li></ul></details>                   | 🔴     | ✅       |
 | [Head-tracked Spatial Audio](#spatial-audio)                | ❓     | ✅       |
-| [Heart Rate Monitoring](#heart-rate-monitoring)             | ⛔     | 🔴       |
+| [Heart Rate Monitoring](#heart-rate-monitoring)             | ⛔     | TEST     |
 | [Find My](#find-my)                                         | ❓     | ❓       |
 | [High quality two-way audio](#high-quality-two-way-audio)   | 🔴     | 🔴       |
 
@@ -104,6 +104,7 @@ Apple device** option.
 | 🔴     | Not implemented yet; planned                                        |
 | ⛔     | Will not be implemented                                             |
 | ❓     | Unknown                                                             |
+| TEST   | Implemented and awaiting wider real-device validation               |
 
 ## Find My
 
@@ -121,8 +122,15 @@ Spatializer implementation. This requires root, `/dev/uhid`, platform Spatialize
 support, and the Root module ZIP built from the same release as the APK. Fixed spatial
 audio can still depend on the device manufacturer's Android audio implementation.
 
-## Heart Rate Monitoring (AirPods Pro 3 and later)
-This is being worked upon, check the #⁠reverse-engineering channel on the LibrePods Discord server for more information. If it is ever implemented, it will most likely need root on Android.
+## Heart Rate Monitoring (AirPods Pro 3)
+
+The Android build includes experimental monitoring for AirPods Pro 3 model numbers
+`A3063`, `A3064`, and `A3065`. The settings entry appears only after current AACP
+Device Information confirms both an exact supported model and the HRM capability.
+It supports live BPM and status, single- or dual-ear wear recovery, reconnect recovery,
+and optional Health Connect export. Health Connect export is off by default and requests
+write permission before storing data. Use the matching APK and KernelSU module together
+for unified system-level device testing; broad real-device validation is still pending.
 
 ## High quality two-way audio
 On iOS/iPadOS, you can continue using A2DP while AirPods send the audio stream from its microphone over AACP. 
