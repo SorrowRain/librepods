@@ -40,6 +40,13 @@ internal interface HeartRateRuntimeSink {
         cleanup: OneShotSensorCleanup,
     ): Boolean
 
+    /** Must only claim and queue recovery; transport teardown cannot run under the coordinator lock. */
+    fun requestHeartRateTransportRecovery(
+        acquisition: HrmAcquisitionToken,
+        reason: HeartRateTransportRecoveryReason,
+        acquisitionIsCurrent: () -> Boolean,
+    ): Boolean
+
     fun startHeadTracking(
         owner: SensorResourceOwner,
         ownerIsCurrent: () -> Boolean,
@@ -316,7 +323,10 @@ internal class HeartRateRuntimeCoordinator(
                 )
             }
 
-            is HeartRateSessionAction.SendStartFrames -> startTransportLocked(action.acquisition)
+            is HeartRateSessionAction.SendStartFrames -> startTransportLocked(
+                action.acquisition,
+                action.quietPeriodMillis,
+            )
             is HeartRateSessionAction.SendStopFrames -> stopTransportLocked(action.acquisition)
             is HeartRateSessionAction.CancelWatchdog -> cancelWatchdogLocked(action.acquisition)
             is HeartRateSessionAction.ScheduleWatchdog ->
@@ -340,13 +350,33 @@ internal class HeartRateRuntimeCoordinator(
                 freshnessJob = null
                 updatePresentationLocked()
             }
+            is HeartRateSessionAction.RequestTransportRecovery -> {
+                val accepted = runCatching {
+                    sink.requestHeartRateTransportRecovery(
+                        action.acquisition,
+                        action.reason,
+                    ) {
+                        isAcquisitionCurrent(action.acquisition)
+                    }
+                }.getOrDefault(false)
+                applySessionEventLocked(
+                    HeartRateSessionEvent.TransportRecoveryResult(
+                        action.acquisition,
+                        accepted,
+                    )
+                )
+            }
         }
     }
 
-    private fun startTransportLocked(acquisition: HrmAcquisitionToken) {
+    private fun startTransportLocked(
+        acquisition: HrmAcquisitionToken,
+        quietPeriodMillis: Long,
+    ) {
         startJobs.remove(acquisition)?.cancel()
         val job = scope.launch(start = CoroutineStart.LAZY) {
             val succeeded = try {
+                if (quietPeriodMillis > 0L) suspendDelay(quietPeriodMillis)
                 sink.startHeartRate(acquisition) {
                     isAcquisitionCurrent(acquisition)
                 }
@@ -434,7 +464,10 @@ internal class HeartRateRuntimeCoordinator(
                 is SensorResourceAction.StartHeartRate -> {
                     val acquisition = action.owner.toHeartRateAcquisition() ?: return@forEach
                     applySessionEventLocked(
-                        HeartRateSessionEvent.SensorResourceGranted(acquisition)
+                        HeartRateSessionEvent.SensorResourceGranted(
+                            acquisition,
+                            quietPeriodMillis = action.quietPeriodMillis,
+                        )
                     )
                 }
                 is SensorResourceAction.StopHeartRate -> {

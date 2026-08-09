@@ -56,7 +56,10 @@ internal sealed interface SensorResourceEvent {
 }
 
 internal sealed interface SensorResourceAction {
-    data class StartHeartRate(val owner: SensorResourceOwner) : SensorResourceAction
+    data class StartHeartRate(
+        val owner: SensorResourceOwner,
+        val quietPeriodMillis: Long = 0L,
+    ) : SensorResourceAction
     data class StopHeartRate(val owner: SensorResourceOwner) : SensorResourceAction
     data class StartHeadTracking(val owner: SensorResourceOwner) : SensorResourceAction
     data class StopHeadTracking(val owner: SensorResourceOwner) : SensorResourceAction
@@ -115,9 +118,10 @@ internal object SensorResourceArbiter {
         current: SensorResourceArbiterState,
         owner: SensorResourceOwner,
     ): SensorResourceTransition {
+        val stoppedHeadTracking = current.activeOwner?.resource == SensorResource.HEAD_TRACKING
         val actions = buildList {
             current.activeOwner?.let { add(stopAction(it)) }
-            add(startAction(owner))
+            add(startAction(owner, quietAfterHeadTrackingStop = stoppedHeadTracking))
         }
         return SensorResourceTransition(
             SensorResourceArbiterState(
@@ -140,9 +144,19 @@ internal object SensorResourceArbiter {
     ): SensorResourceTransition {
         if (!isNewer(owner, current.latestHeartRateOwner)) return unchanged(current)
 
+        val stoppedHeadTracking = current.activeOwner?.resource == SensorResource.HEAD_TRACKING
         val actions = buildList {
             current.activeOwner?.let { add(stopAction(it)) }
-            add(SensorResourceAction.StartHeartRate(owner))
+            add(
+                SensorResourceAction.StartHeartRate(
+                    owner,
+                    quietPeriodMillis = if (stoppedHeadTracking) {
+                        HEAD_TRACKING_QUIET_PERIOD_MILLIS
+                    } else {
+                        0L
+                    },
+                )
+            )
         }
         return SensorResourceTransition(
             current.copy(
@@ -265,9 +279,19 @@ internal object SensorResourceArbiter {
             SensorResource.HEAD_TRACKING -> SensorResourceAction.StopHeadTracking(owner)
         }
 
-    private fun startAction(owner: SensorResourceOwner): SensorResourceAction =
+    private fun startAction(
+        owner: SensorResourceOwner,
+        quietAfterHeadTrackingStop: Boolean = false,
+    ): SensorResourceAction =
         when (owner.resource) {
-            SensorResource.HEART_RATE -> SensorResourceAction.StartHeartRate(owner)
+            SensorResource.HEART_RATE -> SensorResourceAction.StartHeartRate(
+                owner,
+                quietPeriodMillis = if (quietAfterHeadTrackingStop) {
+                    HEAD_TRACKING_QUIET_PERIOD_MILLIS
+                } else {
+                    0L
+                },
+            )
             SensorResource.HEAD_TRACKING -> SensorResourceAction.StartHeadTracking(owner)
         }
 
@@ -276,4 +300,6 @@ internal object SensorResourceArbiter {
 
     private fun unchanged(state: SensorResourceArbiterState) =
         SensorResourceTransition(state)
+
+    internal const val HEAD_TRACKING_QUIET_PERIOD_MILLIS = 220L
 }

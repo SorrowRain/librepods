@@ -239,9 +239,25 @@ class HeartRateSessionTest {
                 HeartRateSessionAction.CancelWatchdog(second),
                 HeartRateSessionAction.SendStopFrames(second),
                 HeartRateSessionAction.ReleaseSensorResource(second),
+                HeartRateSessionAction.RequestTransportRecovery(
+                    second,
+                    HeartRateTransportRecoveryReason.AUTOMATIC,
+                ),
             ),
             failed.actions,
         )
+
+        val accepted = reduce(
+            failed.state,
+            HeartRateSessionEvent.TransportRecoveryResult(second, accepted = true),
+        )
+        assertEquals(HeartRateSessionStatus.RECONNECTING, accepted.state.status)
+
+        val rejected = reduce(
+            failed.state,
+            HeartRateSessionEvent.TransportRecoveryResult(second, accepted = false),
+        )
+        assertEquals(HeartRateSessionStatus.COULDNT_START, rejected.state.status)
     }
 
     @Test

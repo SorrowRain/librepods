@@ -15,12 +15,20 @@ internal data class InitialReconnectPermit(
     val attempt: Int,
 )
 
+internal data class HeartRateRecoveryPermit(
+    val generation: Long,
+    val attempt: Int,
+    val userInitiated: Boolean,
+)
+
 /** Bounds reconnect work to one physical AirPods presence episode. */
 internal class ReconnectEpisodeGate(
     private val maxInitialConnectAttempts: Int = 2,
     private val maxProfileRepairAttempts: Int = 2,
     private val maxControlReconnectAttempts: Int = 3,
     private val maxHeartRateTransportResets: Int = 3,
+    private val maxAutomaticHeartRateRecoveryAttempts: Int = 1,
+    private val maxManualHeartRateRecoveryAttempts: Int = 2,
 ) {
     private var generation = 0L
     private var initialConnectAttempts = 0
@@ -31,12 +39,16 @@ internal class ReconnectEpisodeGate(
     private var controlReconnectAttempts = 0
     private var controlReconnectInFlight = false
     private var heartRateTransportResets = 0
+    private var automaticHeartRateRecoveryAttempts = 0
+    private var manualHeartRateRecoveryAttempts = 0
 
     init {
         require(maxInitialConnectAttempts > 0)
         require(maxProfileRepairAttempts > 0)
         require(maxControlReconnectAttempts > 0)
         require(maxHeartRateTransportResets > 0)
+        require(maxAutomaticHeartRateRecoveryAttempts > 0)
+        require(maxManualHeartRateRecoveryAttempts > 0)
     }
 
     @Synchronized
@@ -100,6 +112,24 @@ internal class ReconnectEpisodeGate(
         return true
     }
 
+    /**
+     * Claims a non-refundable AACP reset for HRM. Automatic failures get one attempt per presence
+     * episode; explicit Retry taps have a separate small budget and still use the lifecycle gate.
+     */
+    @Synchronized
+    fun tryBeginHeartRateRecovery(userInitiated: Boolean): HeartRateRecoveryPermit? {
+        val attempt = if (userInitiated) {
+            if (manualHeartRateRecoveryAttempts >= maxManualHeartRateRecoveryAttempts) return null
+            ++manualHeartRateRecoveryAttempts
+        } else {
+            if (automaticHeartRateRecoveryAttempts >= maxAutomaticHeartRateRecoveryAttempts) {
+                return null
+            }
+            ++automaticHeartRateRecoveryAttempts
+        }
+        return HeartRateRecoveryPermit(generation, attempt, userInitiated)
+    }
+
     @Synchronized
     fun isCurrent(expectedGeneration: Long): Boolean = generation == expectedGeneration
 
@@ -114,5 +144,7 @@ internal class ReconnectEpisodeGate(
         controlReconnectAttempts = 0
         controlReconnectInFlight = false
         heartRateTransportResets = 0
+        automaticHeartRateRecoveryAttempts = 0
+        manualHeartRateRecoveryAttempts = 0
     }
 }

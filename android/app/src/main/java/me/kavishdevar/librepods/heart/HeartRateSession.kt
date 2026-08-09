@@ -89,6 +89,11 @@ internal enum class HeartRateWatchdogKind {
     STREAM_STALL,
 }
 
+internal enum class HeartRateTransportRecoveryReason {
+    AUTOMATIC,
+    USER_RETRY,
+}
+
 internal data class HeartRateWatchdog(
     val kind: HeartRateWatchdogKind,
     val deadlineMillis: Long,
@@ -136,6 +141,7 @@ internal sealed interface HeartRateSessionEvent {
 
     data class SensorResourceGranted(
         val acquisition: HrmAcquisitionToken,
+        val quietPeriodMillis: Long = 0L,
     ) : HeartRateSessionEvent
 
     data class StartFramesSent(
@@ -150,6 +156,10 @@ internal sealed interface HeartRateSessionEvent {
 
     data class Tick(val acquisition: HrmAcquisitionToken) : HeartRateSessionEvent
     data class Retry(val acquisition: HrmAcquisitionToken) : HeartRateSessionEvent
+    data class TransportRecoveryResult(
+        val acquisition: HrmAcquisitionToken,
+        val accepted: Boolean,
+    ) : HeartRateSessionEvent
     data class Stop(val acquisition: HrmAcquisitionToken) : HeartRateSessionEvent
     data object Destroy : HeartRateSessionEvent
 }
@@ -163,6 +173,7 @@ internal sealed interface HeartRateSessionAction {
 
     data class SendStartFrames(
         override val acquisition: HrmAcquisitionToken,
+        val quietPeriodMillis: Long = 0L,
     ) : HeartRateSessionAction
 
     data class SendStopFrames(
@@ -189,6 +200,11 @@ internal sealed interface HeartRateSessionAction {
 
     data class ClearMeasurements(
         override val acquisition: HrmAcquisitionToken,
+    ) : HeartRateSessionAction
+
+    data class RequestTransportRecovery(
+        override val acquisition: HrmAcquisitionToken,
+        val reason: HeartRateTransportRecoveryReason,
     ) : HeartRateSessionAction
 }
 
@@ -228,6 +244,8 @@ internal object HeartRateSessionReducer {
                 sampleReceived(current, event, nowMillis)
             is HeartRateSessionEvent.Tick -> tick(current, event, nowMillis)
             is HeartRateSessionEvent.Retry -> retry(current, event)
+            is HeartRateSessionEvent.TransportRecoveryResult ->
+                transportRecoveryResult(current, event)
             is HeartRateSessionEvent.Stop -> stop(current, event)
             HeartRateSessionEvent.Destroy -> destroy(current)
         }
@@ -433,7 +451,12 @@ internal object HeartRateSessionReducer {
                 ownsSensorResource = true,
                 stopFrameNeeded = true,
             ),
-            listOf(HeartRateSessionAction.SendStartFrames(event.acquisition)),
+            listOf(
+                HeartRateSessionAction.SendStartFrames(
+                    event.acquisition,
+                    quietPeriodMillis = event.quietPeriodMillis,
+                )
+            ),
         )
     }
 
@@ -521,7 +544,34 @@ internal object HeartRateSessionReducer {
         ) {
             return unchanged(current)
         }
-        return beginCapture(current, event.acquisition.key, restartAttempts = 0)
+        return HeartRateSessionTransition(
+            current,
+            listOf(
+                HeartRateSessionAction.RequestTransportRecovery(
+                    event.acquisition,
+                    HeartRateTransportRecoveryReason.USER_RETRY,
+                )
+            ),
+        )
+    }
+
+    private fun transportRecoveryResult(
+        current: HeartRateSessionState,
+        event: HeartRateSessionEvent.TransportRecoveryResult,
+    ): HeartRateSessionTransition {
+        if (!current.matches(event.acquisition) ||
+            current.status != HeartRateSessionStatus.COULDNT_START ||
+            !current.enabled ||
+            !current.supportedTransport ||
+            !current.wear.isWorn
+        ) {
+            return unchanged(current)
+        }
+        return if (event.accepted) {
+            HeartRateSessionTransition(current.copy(status = HeartRateSessionStatus.RECONNECTING))
+        } else {
+            unchanged(current)
+        }
     }
 
     private fun stop(
@@ -616,7 +666,10 @@ internal object HeartRateSessionReducer {
                 retainAcquisition = true,
                 retainRestartAttempts = true,
             ),
-            cleanupActions(current),
+            cleanupActions(current) + HeartRateSessionAction.RequestTransportRecovery(
+                failedAcquisition,
+                HeartRateTransportRecoveryReason.AUTOMATIC,
+            ),
         )
     }
 

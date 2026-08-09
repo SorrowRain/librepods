@@ -90,6 +90,29 @@ class ReconnectEpisodeGateTest {
     }
 
     @Test
+    fun `automatic and user heart rate recovery budgets are independent and non refundable`() {
+        val gate = ReconnectEpisodeGate(
+            maxAutomaticHeartRateRecoveryAttempts = 1,
+            maxManualHeartRateRecoveryAttempts = 2,
+        )
+
+        val automatic = assertNotNull(gate.tryBeginHeartRateRecovery(userInitiated = false))
+        assertEquals(false, automatic.userInitiated)
+        assertNull(gate.tryBeginHeartRateRecovery(userInitiated = false))
+
+        repeat(2) { attempt ->
+            val manual = assertNotNull(gate.tryBeginHeartRateRecovery(userInitiated = true))
+            assertEquals(attempt + 1, manual.attempt)
+            assertEquals(true, manual.userInitiated)
+        }
+        assertNull(gate.tryBeginHeartRateRecovery(userInitiated = true))
+
+        gate.reset()
+        assertNotNull(gate.tryBeginHeartRateRecovery(userInitiated = false))
+        assertNotNull(gate.tryBeginHeartRateRecovery(userInitiated = true))
+    }
+
+    @Test
     fun `reset restores all budgets and invalidates stale permits`() {
         val gate = ReconnectEpisodeGate(maxControlReconnectAttempts = 1)
 

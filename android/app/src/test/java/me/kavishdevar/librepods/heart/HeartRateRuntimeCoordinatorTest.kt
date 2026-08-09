@@ -33,6 +33,7 @@ class HeartRateRuntimeCoordinatorTest {
         fixture.confirmSupported(key)
         fixture.coordinator.updateWear(key, HeartRateWearState(leftWorn = true))
         settle()
+        fixture.completeHeadTrackingQuietPeriod()
 
         assertEquals(
             listOf("start-head-1", "stop-head-1", "start-heart-1"),
@@ -77,6 +78,7 @@ class HeartRateRuntimeCoordinatorTest {
         fixture.confirmSupported(key)
         fixture.coordinator.updateWear(key, HeartRateWearState(leftWorn = true))
         settle()
+        fixture.completeHeadTrackingQuietPeriod()
         assertEquals(
             listOf("start-head-1", "stop-head-1", "start-heart-1"),
             fixture.sink.events,
@@ -105,6 +107,7 @@ class HeartRateRuntimeCoordinatorTest {
         fixture.confirmSupported(key)
         fixture.coordinator.updateWear(key, HeartRateWearState(rightWorn = true))
         settle()
+        fixture.completeHeadTrackingQuietPeriod()
         fixture.coordinator.setEnabledAndAwait(false)
         settle()
 
@@ -202,13 +205,53 @@ class HeartRateRuntimeCoordinatorTest {
         settle()
 
         assertEquals(
-            listOf("start-heart-1", "stop-heart-1", "start-heart-2", "stop-heart-2"),
+            listOf(
+                "start-heart-1",
+                "stop-heart-1",
+                "start-heart-2",
+                "stop-heart-2",
+                "recover-heart-2-automatic",
+            ),
             fixture.sink.events,
         )
         assertEquals(HeartRateSessionStatus.COULDNT_START, fixture.coordinator.session.value.status)
         assertEquals(2L, fixture.coordinator.session.value.acquisition?.acquisition)
         assertEquals(2, fixture.sink.heartStops.size)
         assertTrue(fixture.sink.heartStops.all { it == CleanupUse(true, false) })
+
+        fixture.sink.recoveryAccepted = true
+        fixture.coordinator.retry()
+        settle()
+        assertEquals("recover-heart-2-user_retry", fixture.sink.events.last())
+        assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
+        fixture.close()
+    }
+
+    @Test
+    fun `disable during head tracking quiet period cancels heart rate start`() = runBlocking {
+        val fixture = Fixture()
+        val key = key(epoch = 1L)
+        fixture.coordinator.installConnectionAndAwait(key)
+        fixture.coordinator.requestHeadTracking(key, HeadTrackingRequestSource.SPATIAL_AUDIO)
+        settle()
+
+        fixture.coordinator.setEnabledAndAwait(true)
+        fixture.confirmSupported(key)
+        fixture.coordinator.updateWear(key, HeartRateWearState(leftWorn = true))
+        settle()
+        assertTrue(
+            SensorResourceArbiter.HEAD_TRACKING_QUIET_PERIOD_MILLIS in
+                fixture.delays.pendingDurations()
+        )
+
+        fixture.coordinator.setEnabledAndAwait(false)
+        settle()
+
+        assertFalse(fixture.sink.events.any { it.startsWith("start-heart-") })
+        assertFalse(
+            SensorResourceArbiter.HEAD_TRACKING_QUIET_PERIOD_MILLIS in
+                fixture.delays.pendingDurations()
+        )
         fixture.close()
     }
 
@@ -232,10 +275,11 @@ class HeartRateRuntimeCoordinatorTest {
         assertEquals(listOf(8_000L), fixture.delays.pendingDurations())
 
         fixture.clock.nowMillis = 16_000L
+        fixture.sink.recoveryAccepted = true
         fixture.delays.resumeFirst(8_000L)
         settle()
-        assertEquals("stop-heart-2", fixture.sink.events.last())
-        assertEquals(HeartRateSessionStatus.COULDNT_START, fixture.coordinator.session.value.status)
+        assertEquals("recover-heart-2-automatic", fixture.sink.events.last())
+        assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
         assertTrue(fixture.delays.pendingDurations().isEmpty())
         fixture.close()
     }
@@ -374,6 +418,7 @@ class HeartRateRuntimeCoordinatorTest {
         fixture.confirmSupported(key)
         fixture.coordinator.updateWear(key, HeartRateWearState(leftWorn = true))
         settle()
+        fixture.completeHeadTrackingQuietPeriod()
         assertEquals(
             listOf("start-head-1", "stop-head-1", "start-heart-1"),
             fixture.sink.events,
@@ -429,6 +474,15 @@ class HeartRateRuntimeCoordinatorTest {
             settle()
         }
 
+        suspend fun completeHeadTrackingQuietPeriod() {
+            assertTrue(
+                SensorResourceArbiter.HEAD_TRACKING_QUIET_PERIOD_MILLIS in
+                    delays.pendingDurations()
+            )
+            delays.resumeFirst(SensorResourceArbiter.HEAD_TRACKING_QUIET_PERIOD_MILLIS)
+            settle()
+        }
+
         suspend fun close() {
             coordinator.destroyAndAwait()
             cancelScope()
@@ -467,6 +521,7 @@ class HeartRateRuntimeCoordinatorTest {
         val headStops = mutableListOf<CleanupUse>()
         val published = mutableListOf<HeartRateMeasurement>()
         var allowedWrites = 0
+        var recoveryAccepted = false
 
         override suspend fun startHeartRate(
             acquisition: HrmAcquisitionToken,
@@ -495,6 +550,15 @@ class HeartRateRuntimeCoordinatorTest {
             val use = CleanupUse(cleanup.consume(), cleanup.consume())
             heartStops += use
             return use.first
+        }
+
+        override fun requestHeartRateTransportRecovery(
+            acquisition: HrmAcquisitionToken,
+            reason: HeartRateTransportRecoveryReason,
+            acquisitionIsCurrent: () -> Boolean,
+        ): Boolean {
+            events += "recover-heart-${acquisition.acquisition}-${reason.name.lowercase()}"
+            return recoveryAccepted && acquisitionIsCurrent()
         }
 
         override fun startHeadTracking(

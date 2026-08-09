@@ -75,6 +75,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -138,6 +139,7 @@ import me.kavishdevar.librepods.heart.HeadTrackingRequestSource
 import me.kavishdevar.librepods.heart.HeartRateMeasurement
 import me.kavishdevar.librepods.heart.HeartRateRuntimeCoordinator
 import me.kavishdevar.librepods.heart.HeartRateRuntimeSink
+import me.kavishdevar.librepods.heart.HeartRateTransportRecoveryReason
 import me.kavishdevar.librepods.heart.HeartRateUiState
 import me.kavishdevar.librepods.heart.HeartRateWearState
 import me.kavishdevar.librepods.heart.HrmAcquisitionToken
@@ -190,6 +192,7 @@ private const val A2DP_DIRECT_VOLUME_RESYNC_DELAY_MS = 350L
 private const val A2DP_VOLUME_RESYNC_DEBOUNCE_MS = 1_000L
 private const val A2DP_VOLUME_PULSE_MS = 180L
 private const val AUTOMATIC_RECONNECT_RETRY_DELAY_MS = 1_500L
+private const val HEART_RATE_AACP_RESET_QUIET_PERIOD_MS = 3_000L
 private const val PROFILE_REPAIR_INITIAL_DELAY_MS = 1_500L
 private const val PROFILE_REPAIR_RETRY_DELAY_MS = 4_000L
 private const val FRESH_IN_EAR_BLE_WINDOW_MS = 15_000L
@@ -254,6 +257,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private lateinit var healthConnectHeartRateExporter: HealthConnectHeartRateExporter
     @Volatile
     private var heartRateSessionKey: HrmSessionKey? = null
+    private val heartRateRecoveryLock = Any()
+    private var heartRateRecoveryJob: Job? = null
+    private var heartRateRecoveryAcquisition: HrmAcquisitionToken? = null
+    private var heartRateRecoveryRevision = 0L
     private data class ConnectionNotificationContent(
         val title: String?,
         val text: String,
@@ -614,7 +621,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     )
                     return true
                 }
-                return false
+                return true
             }
             is ReconnectLifecycleBegin.Started -> begin.token
         }
@@ -896,6 +903,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     }
 
     private fun suppressAutomaticReconnect() {
+        invalidateHeartRateTransportRecovery("automatic reconnect suppressed")
         reconnectLifecycleGate.suppress()
         cancelPendingAacpConnection()
     }
@@ -1307,6 +1315,16 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     return heartRateTransport.stop(lease, cleanup::consume)
                 }
 
+                override fun requestHeartRateTransportRecovery(
+                    acquisition: HrmAcquisitionToken,
+                    reason: HeartRateTransportRecoveryReason,
+                    acquisitionIsCurrent: () -> Boolean,
+                ): Boolean = queueHeartRateTransportRecovery(
+                    acquisition = acquisition,
+                    reason = reason,
+                    acquisitionIsCurrent = acquisitionIsCurrent,
+                )
+
                 override fun startHeadTracking(
                     owner: SensorResourceOwner,
                     ownerIsCurrent: () -> Boolean,
@@ -1351,12 +1369,129 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         get() = healthConnectHeartRateExporter.state
 
     fun setHeartRateMonitoringEnabled(enabled: Boolean) {
+        if (!enabled) {
+            invalidateHeartRateTransportRecovery("heart-rate monitoring disabled")
+        }
         heartRatePreferences.edit { putBoolean(HEART_RATE_MONITORING_ENABLED, enabled) }
         heartRateRuntime.setEnabled(enabled)
     }
 
     fun retryHeartRateMonitoring() {
         heartRateRuntime.retry()
+    }
+
+    private fun queueHeartRateTransportRecovery(
+        acquisition: HrmAcquisitionToken,
+        reason: HeartRateTransportRecoveryReason,
+        acquisitionIsCurrent: () -> Boolean,
+    ): Boolean {
+        if (serviceShuttingDown ||
+            reconnectLifecycleGate.isSuppressed() ||
+            !heartRateRuntime.session.value.enabled ||
+            !acquisitionIsCurrent()
+        ) {
+            return false
+        }
+
+        val queued = synchronized(heartRateRecoveryLock) {
+            heartRateRecoveryJob?.takeIf { !it.isCompleted }?.let {
+                val sameAcquisition = heartRateRecoveryAcquisition?.matches(acquisition) == true
+                Log.d(
+                    TAG,
+                    "Heart-rate AACP recovery already queued sameAcquisition=$sameAcquisition"
+                )
+                return sameAcquisition
+            }
+
+            val lease = currentLeaseFor(acquisition.key) ?: return false
+            val permit = reconnectEpisodeGate.tryBeginHeartRateRecovery(
+                userInitiated = reason == HeartRateTransportRecoveryReason.USER_RETRY
+            ) ?: run {
+                Log.w(TAG, "Heart-rate AACP recovery budget exhausted reason=$reason")
+                return false
+            }
+            val recoveryRevision = heartRateRecoveryRevision
+            val recoveryDeviceKey = acquisition.key.deviceKey
+
+            aacpReaderScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    if (serviceShuttingDown ||
+                        reconnectLifecycleGate.isSuppressed() ||
+                        !reconnectEpisodeGate.isCurrent(permit.generation) ||
+                        !isHeartRateTransportRecoveryCurrent(recoveryRevision) ||
+                        !acquisitionIsCurrent() ||
+                        !BluetoothConnectionManager.isCurrent(lease)
+                    ) {
+                        return@launch
+                    }
+
+                    val source = "heart-rate-${reason.name.lowercase()}-recovery"
+                    if (!finishAacpReader(lease, source)) return@launch
+
+                    Log.i(
+                        TAG,
+                        "Waiting ${HEART_RATE_AACP_RESET_QUIET_PERIOD_MS}ms before " +
+                            "controlled heart-rate AACP reconnect"
+                    )
+                    delay(HEART_RATE_AACP_RESET_QUIET_PERIOD_MS)
+                    if (serviceShuttingDown ||
+                        reconnectLifecycleGate.isSuppressed() ||
+                        !reconnectEpisodeGate.isCurrent(permit.generation) ||
+                        !heartRateRuntime.session.value.enabled ||
+                        !isHeartRateTransportRecoveryCurrent(recoveryRevision) ||
+                        !isHeartRateRecoveryDeviceCurrent(recoveryDeviceKey) ||
+                        BluetoothConnectionManager.currentAacpSocketLease() != null ||
+                        heartRateSessionKey != null
+                    ) {
+                        return@launch
+                    }
+
+                    if (!requestAutomaticReconnect(
+                            reason = source,
+                            ensureAudioProfiles = false,
+                            boundedControlRepair = false,
+                            allowAfterExplicitDisconnect = false,
+                        )
+                    ) {
+                        Log.w(TAG, "Controlled heart-rate AACP reconnect was not accepted")
+                    }
+                } finally {
+                    val completed = kotlinx.coroutines.currentCoroutineContext()[Job]
+                    synchronized(heartRateRecoveryLock) {
+                        if (heartRateRecoveryJob === completed) {
+                            heartRateRecoveryJob = null
+                            heartRateRecoveryAcquisition = null
+                        }
+                    }
+                }
+            }.also {
+                heartRateRecoveryJob = it
+                heartRateRecoveryAcquisition = acquisition
+            }
+        }
+        queued.start()
+        return true
+    }
+
+    private fun isHeartRateTransportRecoveryCurrent(expectedRevision: Long): Boolean =
+        synchronized(heartRateRecoveryLock) {
+            heartRateRecoveryRevision == expectedRevision
+        }
+
+    private fun isHeartRateRecoveryDeviceCurrent(expectedDeviceKey: String): Boolean =
+        sharedPreferences.getString("mac_address", null)
+            ?.equals(expectedDeviceKey, ignoreCase = true) == true
+
+    private fun invalidateHeartRateTransportRecovery(reason: String) {
+        val cancelledJob = synchronized(heartRateRecoveryLock) {
+            heartRateRecoveryRevision++
+            heartRateRecoveryAcquisition = null
+            heartRateRecoveryJob.also { heartRateRecoveryJob = null }
+        }
+        if (cancelledJob != null) {
+            cancelledJob.cancel()
+            Log.d(TAG, "Cancelled heart-rate AACP recovery: $reason")
+        }
     }
 
     fun refreshHealthConnectHeartRateExport() {
@@ -1405,6 +1540,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         lease: AacpSocketLease,
         connectedDevice: BluetoothDevice,
     ) {
+        invalidateHeartRateTransportRecovery("new AACP session installed")
         val key = HrmSessionKey(
             socketIdentity = lease.socket,
             generation = lease.generation,

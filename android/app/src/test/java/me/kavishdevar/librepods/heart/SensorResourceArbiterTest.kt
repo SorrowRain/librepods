@@ -26,7 +26,10 @@ class SensorResourceArbiterTest {
         assertEquals(
             listOf(
                 SensorResourceAction.StopHeadTracking(head),
-                SensorResourceAction.StartHeartRate(heart),
+                SensorResourceAction.StartHeartRate(
+                    heart,
+                    quietPeriodMillis = SensorResourceArbiter.HEAD_TRACKING_QUIET_PERIOD_MILLIS,
+                ),
             ),
             heartStarted.actions,
         )
@@ -317,11 +320,21 @@ class SensorResourceArbiterTest {
             session,
             HeartRateSessionEvent.Retry(second),
         )
-        session = transition.state
-        arbiter = applySessionActions(arbiter, transition.actions)
-        session = grantSessionIfRequested(session, arbiter)
-        val third = session.requireAcquisition()
-        assertEquals(SensorResourceOwner.heartRate(third), arbiter.activeOwner)
+        assertSame(session, transition.state)
+        assertEquals(
+            listOf(
+                HeartRateSessionAction.RequestTransportRecovery(
+                    second,
+                    HeartRateTransportRecoveryReason.USER_RETRY,
+                )
+            ),
+            transition.actions,
+        )
+        session = sessionReduce(
+            session,
+            HeartRateSessionEvent.TransportRecoveryResult(second, accepted = true),
+        ).state
+        assertEquals(HeartRateSessionStatus.RECONNECTING, session.status)
 
         transition = sessionReduce(
             session,
@@ -350,8 +363,8 @@ class SensorResourceArbiterTest {
         session = transition.state
         arbiter = applySessionActions(arbiter, transition.actions)
         session = grantSessionIfRequested(session, arbiter)
-        val fourth = session.requireAcquisition()
-        assertEquals(SensorResourceOwner.heartRate(fourth), arbiter.activeOwner)
+        val third = session.requireAcquisition()
+        assertEquals(SensorResourceOwner.heartRate(third), arbiter.activeOwner)
 
         transition = sessionReduce(session, HeartRateSessionEvent.Destroy)
         session = transition.state
