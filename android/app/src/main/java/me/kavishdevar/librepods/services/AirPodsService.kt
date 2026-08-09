@@ -3765,6 +3765,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                                 pendingAacpSocket = null
                                 connectionLease = lease
                                 aacpManager.bindSocketLease(lease)
+                                // Publish the runtime key under the same fence used by teardown.
+                                installHeartRateSession(lease, device)
                                 dispatchRemoteDeviceGuard(
                                     RemoteDeviceAudioGuardEvent.AacpConnected,
                                     "AACP socket connected",
@@ -3776,7 +3778,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             runCatching { socket.close() }
                             return@withTimeout
                         }
-                        installHeartRateSession(installedLease, device)
                         val useVendorAttSocket = XposedRemotePrefProvider.create().getBoolean(
                             "vendor_id_hook", false
                         ) && sharedPreferences.getBoolean("vendor_att_socket", false)
