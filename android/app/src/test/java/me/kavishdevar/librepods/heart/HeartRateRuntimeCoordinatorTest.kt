@@ -224,6 +224,11 @@ class HeartRateRuntimeCoordinatorTest {
         settle()
         assertEquals("recover-heart-2-user_retry", fixture.sink.events.last())
         assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
+        val retryAcquisition = requireNotNull(fixture.coordinator.session.value.acquisition)
+        fixture.sink.completeRecovery(retryAcquisition, accepted = true)
+        settle()
+        assertEquals(3L, fixture.coordinator.session.value.acquisition?.acquisition)
+        assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
         fixture.close()
     }
 
@@ -281,6 +286,51 @@ class HeartRateRuntimeCoordinatorTest {
         assertEquals("recover-heart-2-automatic", fixture.sink.events.last())
         assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
         assertTrue(fixture.delays.pendingDurations().isEmpty())
+        val recoveryAcquisition = requireNotNull(fixture.coordinator.session.value.acquisition)
+        fixture.sink.completeRecovery(recoveryAcquisition, accepted = true)
+        settle()
+        assertEquals(3L, fixture.coordinator.session.value.acquisition?.acquisition)
+        fixture.close()
+    }
+
+    @Test
+    fun `failed same-lease recovery returns to could not start without another write`() = runBlocking {
+        val fixture = Fixture(StartBehavior.FAILURE, StartBehavior.FAILURE)
+        fixture.sink.recoveryAccepted = true
+        val key = key(epoch = 1L)
+        fixture.connectSupportedAndWorn(key)
+        val failedAcquisition = requireNotNull(fixture.coordinator.session.value.acquisition)
+
+        assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
+        fixture.sink.completeRecovery(failedAcquisition, accepted = false)
+        settle()
+
+        assertEquals(HeartRateSessionStatus.COULDNT_START, fixture.coordinator.session.value.status)
+        assertEquals(2, fixture.sink.starts.size)
+        fixture.close()
+    }
+
+    @Test
+    fun `stale recovery callback cannot start heart rate on a replacement lease`() = runBlocking {
+        val fixture = Fixture(StartBehavior.FAILURE, StartBehavior.FAILURE)
+        fixture.sink.recoveryAccepted = true
+        val oldKey = key(epoch = 1L)
+        fixture.connectSupportedAndWorn(oldKey)
+        val staleAcquisition = requireNotNull(fixture.coordinator.session.value.acquisition)
+
+        val replacementKey = key(
+            socket = Any(),
+            generation = 2L,
+            deviceKey = "replacement",
+            epoch = 2L,
+        )
+        fixture.coordinator.installConnectionAndAwait(replacementKey)
+        fixture.sink.completeRecovery(staleAcquisition, accepted = true)
+        settle()
+
+        assertTrue(fixture.coordinator.currentKey()?.matches(replacementKey) == true)
+        assertEquals(HeartRateSessionStatus.WAITING_FOR_AIRPODS, fixture.coordinator.session.value.status)
+        assertEquals(2, fixture.sink.starts.size)
         fixture.close()
     }
 
@@ -520,6 +570,7 @@ class HeartRateRuntimeCoordinatorTest {
         val heartStops = mutableListOf<CleanupUse>()
         val headStops = mutableListOf<CleanupUse>()
         val published = mutableListOf<HeartRateMeasurement>()
+        private val recoveryCallbacks = mutableMapOf<HrmAcquisitionToken, (Boolean) -> Unit>()
         var allowedWrites = 0
         var recoveryAccepted = false
 
@@ -556,9 +607,16 @@ class HeartRateRuntimeCoordinatorTest {
             acquisition: HrmAcquisitionToken,
             reason: HeartRateTransportRecoveryReason,
             acquisitionIsCurrent: () -> Boolean,
+            onResult: (Boolean) -> Unit,
         ): Boolean {
             events += "recover-heart-${acquisition.acquisition}-${reason.name.lowercase()}"
-            return recoveryAccepted && acquisitionIsCurrent()
+            val accepted = recoveryAccepted && acquisitionIsCurrent()
+            if (accepted) recoveryCallbacks[acquisition] = onResult
+            return accepted
+        }
+
+        fun completeRecovery(acquisition: HrmAcquisitionToken, accepted: Boolean) {
+            recoveryCallbacks.remove(acquisition)?.invoke(accepted)
         }
 
         override fun startHeadTracking(

@@ -160,6 +160,14 @@ internal sealed interface HeartRateSessionEvent {
         val acquisition: HrmAcquisitionToken,
         val accepted: Boolean,
     ) : HeartRateSessionEvent
+    data class TransportRecoveryReady(
+        val acquisition: HrmAcquisitionToken,
+        val accepted: Boolean,
+    ) : HeartRateSessionEvent
+    data class TransportFailure(
+        val acquisition: HrmAcquisitionToken,
+        val reason: HeartRateTransportRecoveryReason,
+    ) : HeartRateSessionEvent
     data class Stop(val acquisition: HrmAcquisitionToken) : HeartRateSessionEvent
     data object Destroy : HeartRateSessionEvent
 }
@@ -246,6 +254,10 @@ internal object HeartRateSessionReducer {
             is HeartRateSessionEvent.Retry -> retry(current, event)
             is HeartRateSessionEvent.TransportRecoveryResult ->
                 transportRecoveryResult(current, event)
+            is HeartRateSessionEvent.TransportRecoveryReady ->
+                transportRecoveryReady(current, event)
+            is HeartRateSessionEvent.TransportFailure ->
+                transportFailure(current, event)
             is HeartRateSessionEvent.Stop -> stop(current, event)
             HeartRateSessionEvent.Destroy -> destroy(current)
         }
@@ -574,6 +586,61 @@ internal object HeartRateSessionReducer {
         }
     }
 
+    private fun transportRecoveryReady(
+        current: HeartRateSessionState,
+        event: HeartRateSessionEvent.TransportRecoveryReady,
+    ): HeartRateSessionTransition {
+        if (!current.matches(event.acquisition) ||
+            current.status != HeartRateSessionStatus.RECONNECTING ||
+            !current.enabled ||
+            !current.supportedTransport ||
+            !current.wear.isWorn
+        ) {
+            return unchanged(current)
+        }
+        if (!event.accepted) {
+            return HeartRateSessionTransition(
+                current.copy(status = HeartRateSessionStatus.COULDNT_START)
+            )
+        }
+        return beginCapture(
+            current,
+            event.acquisition.key,
+            restartAttempts = 0,
+            status = HeartRateSessionStatus.RECONNECTING,
+        )
+    }
+
+    private fun transportFailure(
+        current: HeartRateSessionState,
+        event: HeartRateSessionEvent.TransportFailure,
+    ): HeartRateSessionTransition {
+        if (!current.matches(event.acquisition) ||
+            !current.enabled ||
+            !current.supportedTransport ||
+            !current.wear.isWorn ||
+            current.status !in setOf(
+                HeartRateSessionStatus.STARTING,
+                HeartRateSessionStatus.CALIBRATING,
+                HeartRateSessionStatus.LIVE,
+                HeartRateSessionStatus.RECONNECTING,
+            )
+        ) {
+            return unchanged(current)
+        }
+        return HeartRateSessionTransition(
+            current.resetCapture(
+                HeartRateSessionStatus.COULDNT_START,
+                retainAcquisition = true,
+                retainRestartAttempts = true,
+            ),
+            cleanupActions(current) + HeartRateSessionAction.RequestTransportRecovery(
+                event.acquisition,
+                event.reason,
+            ),
+        )
+    }
+
     private fun stop(
         current: HeartRateSessionState,
         event: HeartRateSessionEvent.Stop,
@@ -602,11 +669,12 @@ internal object HeartRateSessionReducer {
         current: HeartRateSessionState,
         key: HrmSessionKey,
         restartAttempts: Int,
+        status: HeartRateSessionStatus = HeartRateSessionStatus.STARTING,
     ): HeartRateSessionTransition {
         val acquisition = current.nextToken(key)
         return HeartRateSessionTransition(
             current.copy(
-                status = HeartRateSessionStatus.STARTING,
+                status = status,
                 acquisition = acquisition,
                 nextAcquisition = acquisition.acquisition,
                 acceptingSamples = false,

@@ -45,6 +45,7 @@ internal interface HeartRateRuntimeSink {
         acquisition: HrmAcquisitionToken,
         reason: HeartRateTransportRecoveryReason,
         acquisitionIsCurrent: () -> Boolean,
+        onResult: (Boolean) -> Unit,
     ): Boolean
 
     fun startHeadTracking(
@@ -191,6 +192,34 @@ internal class HeartRateRuntimeCoordinator(
             mutex.withLock {
                 val acquisition = sessionState.acquisition ?: return@withLock
                 applySessionEventLocked(HeartRateSessionEvent.Retry(acquisition))
+            }
+        }
+    }
+
+    /** Starts a transport-reset request from the reader without touching the shared socket. */
+    fun requestTransportRecovery(
+        acquisition: HrmAcquisitionToken,
+        reason: HeartRateTransportRecoveryReason,
+    ) {
+        scope.launch {
+            mutex.withLock {
+                applySessionEventLocked(
+                    HeartRateSessionEvent.TransportFailure(acquisition, reason)
+                )
+            }
+        }
+    }
+
+    /** Delivers the asynchronous same-lease recovery result back to the reducer. */
+    fun completeTransportRecovery(
+        acquisition: HrmAcquisitionToken,
+        accepted: Boolean,
+    ) {
+        scope.launch {
+            mutex.withLock {
+                applySessionEventLocked(
+                    HeartRateSessionEvent.TransportRecoveryReady(acquisition, accepted)
+                )
             }
         }
     }
@@ -353,11 +382,15 @@ internal class HeartRateRuntimeCoordinator(
             is HeartRateSessionAction.RequestTransportRecovery -> {
                 val accepted = runCatching {
                     sink.requestHeartRateTransportRecovery(
-                        action.acquisition,
-                        action.reason,
-                    ) {
-                        isAcquisitionCurrent(action.acquisition)
-                    }
+                        acquisition = action.acquisition,
+                        reason = action.reason,
+                        acquisitionIsCurrent = {
+                            isAcquisitionCurrent(action.acquisition)
+                        },
+                        onResult = { result ->
+                            completeTransportRecovery(action.acquisition, result)
+                        },
+                    )
                 }.getOrDefault(false)
                 applySessionEventLocked(
                     HeartRateSessionEvent.TransportRecoveryResult(

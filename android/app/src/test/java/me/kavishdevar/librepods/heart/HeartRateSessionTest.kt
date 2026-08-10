@@ -253,6 +253,24 @@ class HeartRateSessionTest {
         )
         assertEquals(HeartRateSessionStatus.RECONNECTING, accepted.state.status)
 
+        val ready = reduce(
+            accepted.state,
+            HeartRateSessionEvent.TransportRecoveryReady(second, accepted = true),
+        )
+        val replacement = ready.state.requireAcquisition()
+        assertTrue(replacement.acquisition > second.acquisition)
+        assertEquals(HeartRateSessionStatus.RECONNECTING, ready.state.status)
+        assertEquals(
+            listOf(HeartRateSessionAction.ClaimSensorResource(replacement)),
+            ready.actions,
+        )
+
+        val aborted = reduce(
+            accepted.state,
+            HeartRateSessionEvent.TransportRecoveryReady(second, accepted = false),
+        )
+        assertEquals(HeartRateSessionStatus.COULDNT_START, aborted.state.status)
+
         val rejected = reduce(
             failed.state,
             HeartRateSessionEvent.TransportRecoveryResult(second, accepted = false),
@@ -292,6 +310,37 @@ class HeartRateSessionTest {
         )
         assertEquals(HeartRateSessionStatus.COULDNT_START, stalledDuringWarmup.state.status)
         assertEquals(retry, stalledDuringWarmup.state.acquisition)
+    }
+
+    @Test
+    fun `reader transport failure requests same-lease recovery without changing the key`() {
+        val key = key(epoch = 1L)
+        var state = startedState(key)
+        val acquisition = state.requireAcquisition()
+        state = startAfterGrant(state, acquisition, nowMillis = 0L)
+        val failed = reduce(
+            state,
+            HeartRateSessionEvent.TransportFailure(
+                acquisition,
+                HeartRateTransportRecoveryReason.AUTOMATIC,
+            ),
+        )
+
+        assertEquals(HeartRateSessionStatus.COULDNT_START, failed.state.status)
+        assertTrue(failed.state.key?.matches(key) == true)
+        assertEquals(acquisition, failed.state.acquisition)
+        assertEquals(
+            listOf(
+                HeartRateSessionAction.CancelWatchdog(acquisition),
+                HeartRateSessionAction.SendStopFrames(acquisition),
+                HeartRateSessionAction.ReleaseSensorResource(acquisition),
+                HeartRateSessionAction.RequestTransportRecovery(
+                    acquisition,
+                    HeartRateTransportRecoveryReason.AUTOMATIC,
+                ),
+            ),
+            failed.actions,
+        )
     }
 
     @Test

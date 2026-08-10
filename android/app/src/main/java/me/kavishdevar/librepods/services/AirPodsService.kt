@@ -108,6 +108,7 @@ import me.kavishdevar.librepods.bluetooth.BLEManager
 import me.kavishdevar.librepods.bluetooth.BluetoothConnectionManager
 import me.kavishdevar.librepods.bluetooth.HeartRateAacpTransport
 import me.kavishdevar.librepods.bluetooth.LeaseFencedRtBuddyHeartRateDecoder
+import me.kavishdevar.librepods.bluetooth.PendingSocketWatchdog
 import me.kavishdevar.librepods.bluetooth.ReconnectEpisodeGate
 import me.kavishdevar.librepods.bluetooth.ReconnectLifecycleBegin
 import me.kavishdevar.librepods.bluetooth.ReconnectLifecycleGate
@@ -183,6 +184,9 @@ import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_RIGHT_
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_RIGHT_LOW_BATTERY_THRESHOLD
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.time.Duration.Companion.milliseconds
@@ -192,7 +196,8 @@ private const val A2DP_DIRECT_VOLUME_RESYNC_DELAY_MS = 350L
 private const val A2DP_VOLUME_RESYNC_DEBOUNCE_MS = 1_000L
 private const val A2DP_VOLUME_PULSE_MS = 180L
 private const val AUTOMATIC_RECONNECT_RETRY_DELAY_MS = 1_500L
-private const val HEART_RATE_AACP_RESET_QUIET_PERIOD_MS = 3_000L
+private const val AACP_CONNECT_TIMEOUT_MS = 5_000L
+private const val HEART_RATE_TRANSPORT_RESET_QUIET_PERIOD_MS = 3_000L
 private const val PROFILE_REPAIR_INITIAL_DELAY_MS = 1_500L
 private const val PROFILE_REPAIR_RETRY_DELAY_MS = 4_000L
 private const val FRESH_IN_EAR_BLE_WINDOW_MS = 15_000L
@@ -247,6 +252,14 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private lateinit var audioManager: AudioManager
     private val audioFeatureScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val aacpReaderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** A blocked platform BluetoothSocket.connect() must not occupy the only reconnect worker. */
+    private val aacpConnectWatchdogExecutor: ScheduledExecutorService =
+        Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "LibrePods-AACP-connect-watchdog").apply {
+                isDaemon = true
+            }
+        }
+    private val pendingAacpSocketWatchdog = PendingSocketWatchdog<BluetoothSocket>()
     private val heartRateScope = CoroutineScope(
         SupervisorJob() + Dispatchers.IO.limitedParallelism(1)
     )
@@ -659,15 +672,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 Log.i(TAG, "Attempting automatic AirPods reconnect: $reason")
 
                 socketConnected = BluetoothConnectionManager.aacpSocket?.isConnected == true
-                for (attempt in 0..1) {
-                    if (socketConnected ||
-                        !isAutomaticReconnectAllowed(
-                            lifecycleToken,
-                            reconnectEpisodeGeneration,
-                        )
-                    ) {
-                        break
-                    }
+                if (!socketConnected && isAutomaticReconnectAllowed(
+                        lifecycleToken,
+                        reconnectEpisodeGeneration,
+                    )
+                ) {
                     attemptedConnect = true
                     connectToSocket(
                         adapter,
@@ -680,9 +689,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         },
                     )
                     socketConnected = BluetoothConnectionManager.aacpSocket?.isConnected == true
-                    if (!socketConnected && attempt == 0) {
-                        delay(AUTOMATIC_RECONNECT_RETRY_DELAY_MS)
-                    }
                 }
                 if (socketConnected && ensureAudioProfiles &&
                     isAutomaticReconnectAllowed(lifecycleToken, reconnectEpisodeGeneration)
@@ -697,7 +703,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 if (!socketConnected &&
                     isAutomaticReconnectAllowed(lifecycleToken, reconnectEpisodeGeneration)
                 ) {
-                    Log.w(TAG, "Automatic AACP reconnect failed after bounded retry: $reason")
+                    Log.w(TAG, "Automatic AACP reconnect attempt failed: $reason")
                 }
             } finally {
                 presencePermit?.let {
@@ -912,9 +918,45 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         reconnectLifecycleGate.allow()
     }
 
+    private fun armPendingAacpSocketWatchdog(socket: BluetoothSocket) {
+        pendingAacpSocketWatchdog.arm(socket)
+        aacpConnectWatchdogExecutor.schedule(
+            {
+                val shouldClose = synchronized(connectionLifecycleLock) {
+                    if (pendingAacpSocket !== socket ||
+                        !pendingAacpSocketWatchdog.expireIfCurrent(socket)
+                    ) {
+                        false
+                    } else {
+                        pendingAacpSocket = null
+                        true
+                    }
+                }
+                if (shouldClose) {
+                    Log.w(TAG, "AACP socket connect watchdog expired")
+                    runCatching { socket.close() }
+                }
+            },
+            AACP_CONNECT_TIMEOUT_MS,
+            TimeUnit.MILLISECONDS,
+        )
+    }
+
+    /** Clears watchdog ownership only for the exact pending socket. */
+    private fun clearPendingAacpSocket(socket: BluetoothSocket): Boolean =
+        synchronized(connectionLifecycleLock) {
+            if (pendingAacpSocket !== socket) return@synchronized false
+            pendingAacpSocket = null
+            pendingAacpSocketWatchdog.cancel(socket)
+            true
+        }
+
     private fun cancelPendingAacpConnection() {
         val pendingSocket = synchronized(connectionLifecycleLock) {
-            pendingAacpSocket.also { pendingAacpSocket = null }
+            pendingAacpSocket.also {
+                pendingAacpSocket = null
+                it?.let(pendingAacpSocketWatchdog::cancel)
+            }
         }
         pendingSocket?.let { socket -> runCatching { socket.close() } }
     }
@@ -1319,10 +1361,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     acquisition: HrmAcquisitionToken,
                     reason: HeartRateTransportRecoveryReason,
                     acquisitionIsCurrent: () -> Boolean,
+                    onResult: (Boolean) -> Unit,
                 ): Boolean = queueHeartRateTransportRecovery(
                     acquisition = acquisition,
                     reason = reason,
                     acquisitionIsCurrent = acquisitionIsCurrent,
+                    onResult = onResult,
                 )
 
                 override fun startHeadTracking(
@@ -1384,6 +1428,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         acquisition: HrmAcquisitionToken,
         reason: HeartRateTransportRecoveryReason,
         acquisitionIsCurrent: () -> Boolean,
+        onResult: (Boolean) -> Unit,
     ): Boolean {
         if (serviceShuttingDown ||
             reconnectLifecycleGate.isSuppressed() ||
@@ -1414,48 +1459,28 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             val recoveryDeviceKey = acquisition.key.deviceKey
 
             aacpReaderScope.launch(start = CoroutineStart.LAZY) {
+                var resultDelivered = false
                 try {
-                    if (serviceShuttingDown ||
-                        reconnectLifecycleGate.isSuppressed() ||
-                        !reconnectEpisodeGate.isCurrent(permit.generation) ||
-                        !isHeartRateTransportRecoveryCurrent(recoveryRevision) ||
-                        !acquisitionIsCurrent() ||
-                        !BluetoothConnectionManager.isCurrent(lease)
-                    ) {
-                        return@launch
-                    }
-
-                    val source = "heart-rate-${reason.name.lowercase()}-recovery"
-                    if (!finishAacpReader(lease, source)) return@launch
-
                     Log.i(
                         TAG,
-                        "Waiting ${HEART_RATE_AACP_RESET_QUIET_PERIOD_MS}ms before " +
-                            "controlled heart-rate AACP reconnect"
+                        "Waiting ${HEART_RATE_TRANSPORT_RESET_QUIET_PERIOD_MS}ms before " +
+                            "same-lease heart-rate restart"
                     )
-                    delay(HEART_RATE_AACP_RESET_QUIET_PERIOD_MS)
-                    if (serviceShuttingDown ||
-                        reconnectLifecycleGate.isSuppressed() ||
-                        !reconnectEpisodeGate.isCurrent(permit.generation) ||
-                        !heartRateRuntime.session.value.enabled ||
-                        !isHeartRateTransportRecoveryCurrent(recoveryRevision) ||
-                        !isHeartRateRecoveryDeviceCurrent(recoveryDeviceKey) ||
-                        BluetoothConnectionManager.currentAacpSocketLease() != null ||
-                        heartRateSessionKey != null
-                    ) {
-                        return@launch
-                    }
-
-                    if (!requestAutomaticReconnect(
-                            reason = source,
-                            ensureAudioProfiles = false,
-                            boundedControlRepair = false,
-                            allowAfterExplicitDisconnect = false,
-                        )
-                    ) {
-                        Log.w(TAG, "Controlled heart-rate AACP reconnect was not accepted")
-                    }
+                    delay(HEART_RATE_TRANSPORT_RESET_QUIET_PERIOD_MS)
+                    val current = !serviceShuttingDown &&
+                        !reconnectLifecycleGate.isSuppressed() &&
+                        reconnectEpisodeGate.isCurrent(permit.generation) &&
+                        heartRateRuntime.session.value.enabled &&
+                        isHeartRateTransportRecoveryCurrent(recoveryRevision) &&
+                        isHeartRateRecoveryDeviceCurrent(recoveryDeviceKey) &&
+                        acquisitionIsCurrent() &&
+                        BluetoothConnectionManager.isCurrent(lease)
+                    resultDelivered = true
+                    onResult(current)
                 } finally {
+                    if (!resultDelivered) {
+                        runCatching { onResult(false) }
+                    }
                     val completed = kotlinx.coroutines.currentCoroutineContext()[Job]
                     synchronized(heartRateRecoveryLock) {
                         if (heartRateRecoveryJob === completed) {
@@ -3876,6 +3901,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 false
             } else {
                 pendingAacpSocket = socket
+                armPendingAacpSocketWatchdog(socket)
                 true
             }
         }
@@ -3893,11 +3919,16 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     try {
                         socket.connect()
                         if (serviceShuttingDown || connectionGuard?.invoke() == false) {
+                            clearPendingAacpSocket(socket)
                             runCatching { socket.close() }
                             return@withTimeout
                         }
                         val installedLease = synchronized(connectionLifecycleLock) {
-                            if (serviceShuttingDown || connectionGuard?.invoke() == false) {
+                            if (serviceShuttingDown ||
+                                connectionGuard?.invoke() == false ||
+                                pendingAacpSocket !== socket ||
+                                !pendingAacpSocketWatchdog.cancel(socket)
+                            ) {
                                 return@synchronized null
                             }
                             aacpSessionJob?.cancel()
@@ -3926,6 +3957,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             lease
                         }
                         if (installedLease == null) {
+                            clearPendingAacpSocket(socket)
                             runCatching { socket.close() }
                             return@withTimeout
                         }
@@ -4013,7 +4045,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             setPackage(packageName)
                         })
                     } catch (e: Exception) {
-                        if (pendingAacpSocket === socket) pendingAacpSocket = null
+                        clearPendingAacpSocket(socket)
                         connectionLease?.let { installedLease ->
                             setupFailureHandled = true
                             finishAacpReader(installedLease, "connection setup failed")
@@ -4038,11 +4070,14 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             if (connectionGuard?.invoke() == false || serviceShuttingDown) {
                 connectionLease?.let { installedLease ->
                     finishAacpReader(installedLease, "reconnect request superseded")
-                } ?: runCatching { socket.close() }
+                } ?: run {
+                    clearPendingAacpSocket(socket)
+                    runCatching { socket.close() }
+                }
                 return
             }
             if (!socket.isConnected) {
-                if (pendingAacpSocket === socket) pendingAacpSocket = null
+                clearPendingAacpSocket(socket)
                 runCatching { socket.close() }
                 Log.d(TAG, "<LogCollector:Complete:Failed> socket not connected")
                 if (manual) {
@@ -4179,24 +4214,30 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                                 }
                                 if (decoded.requiresTransportReset) {
                                     Log.w(TAG, "Heart-rate sensor transport requested a reset")
-                                    if (finishAacpReader(lease, "invalid sensor transport")) {
-                                        if (reconnectEpisodeGate
-                                                .tryConsumeHeartRateTransportReset()
-                                        ) {
-                                            requestAutomaticReconnect(
-                                                "heart_rate_transport_reset",
-                                                ensureAudioProfiles = false,
-                                                boundedControlRepair = true,
-                                            )
-                                        } else {
-                                            Log.w(
-                                                TAG,
-                                                "Heart-rate transport reset budget exhausted " +
-                                                    "for this presence episode",
+                                    if (reconnectEpisodeGate.tryConsumeHeartRateTransportReset()) {
+                                        val heartRateKey = currentHeartRateKeyFor(lease)
+                                        val acquisition = heartRateRuntime.session.value.acquisition
+                                            ?.takeIf { token ->
+                                                heartRateKey?.matches(token.key) == true
+                                            }
+                                        if (acquisition != null) {
+                                            heartRateRuntime.requestTransportRecovery(
+                                                acquisition,
+                                                HeartRateTransportRecoveryReason.AUTOMATIC,
                                             )
                                         }
+                                    } else {
+                                        Log.w(
+                                            TAG,
+                                            "Heart-rate transport reset budget exhausted " +
+                                                "for this presence episode",
+                                        )
                                     }
-                                    return@launch
+                                    // The AACP control link remains shared and current. Reset only
+                                    // this reader's decoder; the coordinator will stop/start HRM
+                                    // on the same lease after its quiet period.
+                                    leaseHeartRateDecoder.reset()
+                                    continue
                                 }
 
                                 val heartRateKey = currentHeartRateKeyFor(lease)
@@ -4266,7 +4307,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 }
             }
         } catch (e: Exception) {
-            if (pendingAacpSocket === socket) pendingAacpSocket = null
+            clearPendingAacpSocket(socket)
             connectionLease?.let { installedLease ->
                 finishAacpReader(installedLease, "connection failed")
             } ?: runCatching { socket.close() }
@@ -4634,8 +4675,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             BluetoothConnectionManager.invalidateAttSocket()
             runCatching { pendingAacpSocket?.close() }
             pendingAacpSocket = null
+            pendingAacpSocketWatchdog.clear()
             aacpManager.disconnected(currentLease)
         }
+        aacpConnectWatchdogExecutor.shutdownNow()
         runBlocking {
             healthConnectHeartRateExporter.closeAndAwait()
             heartRateRuntime.destroyAndAwait()

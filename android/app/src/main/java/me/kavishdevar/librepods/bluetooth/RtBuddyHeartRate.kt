@@ -55,6 +55,10 @@ internal class LeaseFencedRtBuddyHeartRateDecoder(
     private val decoder: RtBuddyHeartRateDecoder,
     private val leaseIsCurrent: () -> Boolean,
 ) {
+    fun reset() {
+        if (leaseIsCurrent()) decoder.reset()
+    }
+
     fun feed(chunk: ByteArray): HeartRateDecodeResult? {
         if (!leaseIsCurrent()) return null
         val decoded = decoder.feed(chunk)
