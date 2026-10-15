@@ -39,6 +39,8 @@
     <string name="relative_conversational_awareness_volume_description">Reduces to a percentage of the current volume instead of the maximum volume.</string>
     <string name="conversational_awareness_pause_music">Pause Music</string>
     <string name="conversational_awareness_pause_music_description">When you start speaking, music will be paused.</string>
+    <string name="conversational_awareness_both_pods_only">Both AirPods in Ear</string>
+    <string name="conversational_awareness_both_pods_only_description">Conversational Awareness only activates when both AirPods are in your ears. This also suppresses the Pause Music action when wearing a single AirPod.</string>
     <string name="appwidget_text">EXAMPLE</string>
     <string name="add_widget">Add widget</string>
     <string name="noise_control_widget_description">Control Noise Control Mode directly from your Home Screen.</string>
@@ -153,6 +155,7 @@
     <string name="guard_health_reason_barrier_stuck">audio is stuck on the phone speaker</string>
     <string name="guard_health_reason_local_mac_unknown">this phone\'s Bluetooth address is unknown</string>
     <string name="guard_health_reason_native_transport_missing">Xposed A2DP block unavailable</string>
+    <string name="guard_health_reason_preferred_route_missing">speaker override was not applied</string>
     <string name="guard_health_reason_disabled">turned off</string>
     <string name="guard_health_status_active">Active</string>
     <string name="guard_health_status_inactive">Not active: %1$s</string>
@@ -172,6 +175,7 @@
     <string name="guard_health_remedy_barrier_stuck">Turn the protection off and on again; reboot if audio stays on the speaker.</string>
     <string name="guard_health_remedy_local_mac">Grant root access to LibrePods, or install the Root module.</string>
     <string name="guard_health_remedy_native">Enable the LibrePods module in LSPosed for the Bluetooth app, then reboot.</string>
+    <string name="guard_health_remedy_preferred_route">Audio may go silent instead of moving to the speaker. Try a reboot; if it persists the ROM may block the speaker override.</string>
     <string name="reset_hook_offset">Reset Hook Offset</string>
     <string name="reset_hook_offset_description">This will clear the current hook offset and require you to go through the setup process again. Are you sure you want to continue?</string>
     <string name="reset">Reset</string>
@@ -319,7 +323,13 @@
     <string name="heart_rate_status_live">Live</string>
     <string name="heart_rate_status_reconnecting">Reconnecting</string>
     <string name="heart_rate_status_couldnt_start">Couldn\'t start</string>
+    <string name="heart_rate_retry_paused_by_remote_audio">Another device is playing audio; automatic retry is paused. Manual retry is still available</string>
+    <string name="heart_rate_retry_in_progress">Automatic retry in progress (%1$d)</string>
     <string name="heart_rate_try_again">Try again</string>
+    <string name="heart_rate_auto_retry">Automatic retry</string>
+    <string name="heart_rate_auto_retry_description">Retry automatically when heart rate fails to start, backing off until it recovers</string>
+    <string name="heart_rate_respect_remote_audio_guard">Pause retry while another device plays audio</string>
+    <string name="heart_rate_respect_remote_audio_guard_description">Wait until no other device is using the AirPods audio before retrying automatically</string>
     <string name="heart_rate_unavailable">No supported AirPods Pro 3 connection is active.</string>
     <string name="spatial_audio">Spatial Audio</string>
     <string name="spatial_audio_mode_description">Choose whether spatial audio is off, fixed to your head, or anchored to the phone with head tracking.</string>
@@ -332,4 +342,18 @@
     <string name="spatial_audio_checking">Checking Root, UHID and Spatializer support…</string>
     <string name="spatial_audio_helper_unavailable">The Root head-tracker helper or /dev/uhid is unavailable.</string>
     <string name="spatial_audio_platform_unavailable">This Android audio implementation does not expose a compatible Spatializer.</string>
+    <string name="audio_handoff_take_phone">Switch to phone</string>
+    <string name="audio_handoff_cancel">Cancel switch</string>
+    <string name="audio_handoff_tile_switching">Switching…</string>
+    <string name="audio_handoff_tile_retry">Switch incomplete. Tap to retry.</string>
+    <string name="audio_handoff_tile_remote">In use on another device</string>
+    <string name="audio_handoff_service_unavailable">Open LibrePods first</string>
+    <string name="audio_handoff_switching">Switching audio to this phone…</string>
+    <string name="audio_handoff_failed">Audio handoff was not confirmed. You can retry or select AirPods in system audio settings.</string>
+    <string name="audio_handoff_remote">Protecting audio on the other device</string>
+    <string name="audio_handoff_phone">This phone is using AirPods</string>
+    <string name="audio_handoff_disconnected">AirPods are not connected</string>
+    <string name="audio_handoff_ready">Ready to use AirPods on this phone</string>
+    <string name="audio_handoff_copy_diagnostics">Copy switching diagnostics</string>
+    <string name="audio_handoff_diagnostics_copied">Switching diagnostics copied</string>
 </resources>

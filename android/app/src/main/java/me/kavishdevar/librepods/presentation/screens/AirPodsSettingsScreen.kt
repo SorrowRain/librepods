@@ -107,6 +107,7 @@ import me.kavishdevar.librepods.data.Capability
 import me.kavishdevar.librepods.presentation.MaterialIcons
 import me.kavishdevar.librepods.presentation.components.AboutCard
 import me.kavishdevar.librepods.presentation.components.AudioSettings
+import me.kavishdevar.librepods.presentation.components.AudioHandoffControl
 import me.kavishdevar.librepods.presentation.components.BatteryView
 import me.kavishdevar.librepods.presentation.components.CallControlSettings
 import me.kavishdevar.librepods.presentation.components.ConnectionSettings
@@ -194,7 +195,8 @@ fun AirPodsSettingsRoute(
             navigateToMicrophoneSettings = navigateToMicrophoneSettings,
 
             activateDemoMode = viewModel::activateDemoMode,
-            reconnectFromSavedMac = viewModel::reconnectFromSavedMac
+            reconnectFromSavedMac = viewModel::reconnectFromSavedMac,
+            handoffControl = { AudioHandoffControl() },
         )
     }
 }
@@ -238,6 +240,7 @@ fun AirPodsSettingsScreen(
 
         activateDemoMode: () -> Unit,
         reconnectFromSavedMac: () -> Unit,
+        handoffControl: @Composable () -> Unit = {},
 ) {
     val sharedPreferences = LocalContext.current.getSharedPreferences("settings", MODE_PRIVATE)
     var deviceName by remember {
@@ -310,6 +313,8 @@ fun AirPodsSettingsScreen(
                     }
                 }
             }
+
+            item(key = "audio_handoff") { handoffControl() }
 
             item(key = "battery") {
                 BatteryView(
@@ -903,6 +908,7 @@ fun AirPodsSettingsScreen(
                             )
                         }
 
+                        handoffControl()
                         if (state.connectionSuccessful) {
                             StyledButton(
                                 onClick = { reconnectFromSavedMac(); reconnecting = true },

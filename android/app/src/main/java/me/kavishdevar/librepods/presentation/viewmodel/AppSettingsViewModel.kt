@@ -26,6 +26,7 @@ import kotlin.math.roundToInt
 data class AppSettingsUiState(
     val showPhoneBatteryInWidget: Boolean = false,
     val conversationalAwarenessPauseMusicEnabled: Boolean = false,
+    val conversationalAwarenessBothPodsOnlyEnabled: Boolean = false,
     val relativeConversationalAwarenessVolumeEnabled: Boolean = true,
     val disconnectWhenNotWearing: Boolean = false,
     val useAlternateHeadTrackingPackets: Boolean = true,
@@ -120,6 +121,21 @@ class AppSettingsViewModel(application: Application) : AndroidViewModel(applicat
                     // No billing premium, only update if no temporary premium is active
                     if (_uiState.value.timeUntilFOSSPremiumExpiry <= 0L) {
                         _uiState.update { it.copy(isPremium = false) }
+                        // The both-pods-only conversational-awareness option is premium-gated in the
+                        // UI; once entitlement lapses, clear the persisted flag so the service stops
+                        // applying a behavior the user can no longer see or change.
+                        if (sharedPreferences.getBoolean(
+                                "conversational_awareness_both_pods_only",
+                                false
+                            )
+                        ) {
+                            sharedPreferences.edit {
+                                remove("conversational_awareness_both_pods_only")
+                            }
+                            _uiState.update {
+                                it.copy(conversationalAwarenessBothPodsOnlyEnabled = false)
+                            }
+                        }
                     }
                 }
             }
@@ -179,6 +195,7 @@ class AppSettingsViewModel(application: Application) : AndroidViewModel(applicat
             currentState.copy(
                 showPhoneBatteryInWidget = sharedPreferences.getBoolean("show_phone_battery_in_widget", false),
                 conversationalAwarenessPauseMusicEnabled = sharedPreferences.getBoolean("conversational_awareness_pause_music", false),
+                conversationalAwarenessBothPodsOnlyEnabled = sharedPreferences.getBoolean("conversational_awareness_both_pods_only", false),
                 relativeConversationalAwarenessVolumeEnabled = sharedPreferences.getBoolean("relative_conversational_awareness_volume", true),
                 disconnectWhenNotWearing = sharedPreferences.getBoolean("disconnect_when_not_wearing", false),
                 useAlternateHeadTrackingPackets = sharedPreferences.getBoolean("use_alternate_head_tracking_packets", true),
@@ -206,6 +223,13 @@ class AppSettingsViewModel(application: Application) : AndroidViewModel(applicat
     fun setConversationalAwarenessPauseMusicEnabled(enabled: Boolean) {
         sharedPreferences.edit { putBoolean("conversational_awareness_pause_music", enabled) }
         _uiState.update { it.copy(conversationalAwarenessPauseMusicEnabled = enabled) }
+    }
+
+    fun setConversationalAwarenessBothPodsOnlyEnabled(enabled: Boolean) {
+        sharedPreferences.edit {
+            putBoolean("conversational_awareness_both_pods_only", enabled)
+        }
+        _uiState.update { it.copy(conversationalAwarenessBothPodsOnlyEnabled = enabled) }
     }
 
     fun setRelativeConversationalAwarenessVolumeEnabled(enabled: Boolean) {

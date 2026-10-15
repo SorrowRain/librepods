@@ -18,4 +18,5 @@
     <string name="health_connect_status_ready">Write permission granted. Export is off.</string>
     <string name="health_connect_status_enabled">Heart-rate export is enabled.</string>
     <string name="health_connect_status_error">Health Connect is temporarily unavailable. Export will retry.</string>
+    <string name="health_connect_dropped_measurements">%1$d heart-rate sample(s) were dropped while Health Connect was busy. Some history may be missing.</string>
 </resources>

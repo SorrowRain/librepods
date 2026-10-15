@@ -12,7 +12,7 @@ interface XposedRemotePref {
      * Publishes a short A2DP START guard lease to the Bluetooth process.
      * Passing zero clears the lease immediately.
      */
-    fun setA2dpStartGuardLease(remainingMs: Long)
+    fun setA2dpStartGuardLease(remainingMs: Long): Long?
 }
 
 object A2dpStartGuardLease {

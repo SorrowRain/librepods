@@ -22,9 +22,6 @@ class KotlinModule: XposedModule() {
     private var a2dpStartGuardPreferenceListener:
         SharedPreferences.OnSharedPreferenceChangeListener? = null
     private val a2dpStartGuardApplyLock = Any()
-    private var lastAppliedA2dpStartGuardEnabled: Boolean? = null
-    private var lastAppliedA2dpStartGuardExpiryMs: Long? = null
-    private var lastAppliedA2dpStartGuardBootId: String? = null
     private var lastAppliedA2dpStartGuardActive: Boolean? = null
 
     override fun onModuleLoaded(param: ModuleLoadedParam) {
@@ -124,13 +121,6 @@ class KotlinModule: XposedModule() {
             val revisionAfter = preferences.getLong(A2dpStartGuardLease.REVISION_KEY, 0L)
             if (!A2dpStartGuardLease.isStableRevision(revisionBefore, revisionAfter)) return
             synchronized(a2dpStartGuardApplyLock) {
-                if (enabled == lastAppliedA2dpStartGuardEnabled &&
-                    expiryElapsedRealtimeMs == lastAppliedA2dpStartGuardExpiryMs &&
-                    leaseBootId == lastAppliedA2dpStartGuardBootId
-                ) {
-                    return
-                }
-
                 val remainingMs = A2dpStartGuardLease.remainingMs(
                     enabled = enabled,
                     expiryElapsedRealtimeMs = expiryElapsedRealtimeMs,
@@ -139,9 +129,15 @@ class KotlinModule: XposedModule() {
                     nowElapsedRealtimeMs = SystemClock.elapsedRealtime()
                 )
                 NativeBridge.setA2dpStartGuardLease(remainingMs)
-                lastAppliedA2dpStartGuardEnabled = enabled
-                lastAppliedA2dpStartGuardExpiryMs = expiryElapsedRealtimeMs
-                lastAppliedA2dpStartGuardBootId = leaseBootId
+                val application = Class.forName("android.app.ActivityThread")
+                    .getMethod("currentApplication").invoke(null) as? android.app.Application
+                application?.sendBroadcast(android.content.Intent(
+                    "me.kavishdevar.librepods.NATIVE_GUARD_APPLIED"
+                ).setPackage("me.kavishdevar.librepods")
+                    .putExtra("revision", revisionAfter)
+                    .putExtra("hookInstalled", NativeBridge.isA2dpStartGuardHookInstalled())
+                    .putExtra("expiry", if (remainingMs > 0) SystemClock.elapsedRealtime() + remainingMs else 0L),
+                    "android.permission.BLUETOOTH_PRIVILEGED")
 
                 val active = remainingMs > 0L
                 if (active != lastAppliedA2dpStartGuardActive) {
@@ -177,7 +173,7 @@ class KotlinModule: XposedModule() {
                     }
 
                     val uri = iconUri.toUri()
-                    if (!uri.toString().startsWith("android.resource://me.kavishdevar.librepods")) {
+                    if (uri.authority != moduleApplicationInfo.packageName) {
                         return@intercept chain.proceed()
                     }
 
@@ -232,6 +228,7 @@ class KotlinModule: XposedModule() {
 object NativeBridge {
     external fun setSdpHook(enabled: Boolean)
     external fun setA2dpStartGuardLease(remainingMs: Long)
+    external fun isA2dpStartGuardHookInstalled(): Boolean
 }
 
 private const val REMOTE_PREFERENCES_NAME = "me.kavishdevar.librepods"

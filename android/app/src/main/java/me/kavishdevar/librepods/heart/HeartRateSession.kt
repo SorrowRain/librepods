@@ -87,11 +87,13 @@ internal data class HeartRateMeasurement(
 internal enum class HeartRateWatchdogKind {
     FIRST_SAMPLE,
     STREAM_STALL,
+    START_SEQUENCE_TIMEOUT,
 }
 
 internal enum class HeartRateTransportRecoveryReason {
     AUTOMATIC,
     USER_RETRY,
+    AUTO_RETRY,
 }
 
 internal data class HeartRateWatchdog(
@@ -155,7 +157,10 @@ internal sealed interface HeartRateSessionEvent {
     ) : HeartRateSessionEvent
 
     data class Tick(val acquisition: HrmAcquisitionToken) : HeartRateSessionEvent
-    data class Retry(val acquisition: HrmAcquisitionToken) : HeartRateSessionEvent
+    data class Retry(
+        val acquisition: HrmAcquisitionToken,
+        val reason: HeartRateTransportRecoveryReason,
+    ) : HeartRateSessionEvent
     data class TransportRecoveryResult(
         val acquisition: HrmAcquisitionToken,
         val accepted: Boolean,
@@ -225,6 +230,12 @@ internal data class HeartRateSessionTransition(
 internal object HeartRateSessionReducer {
     const val FIRST_SAMPLE_TIMEOUT_MILLIS = 8_000L
     const val STREAM_STALL_TIMEOUT_MILLIS = 2_000L
+    // Covers logical hangs (state-machine stall, missing events). Cannot interrupt OS-level socket
+    // write blocks; if Bluetooth stack I/O permanently stalls, the restart queues behind the
+    // blocked write. Full mitigation would require L2CAP-level write timeouts.
+    // TODO: once validated on device, consider closing the stalled socket from the watchdog
+    // (transport escalation) to break permanent OS-level write blocks.
+    const val START_SEQUENCE_TIMEOUT_MILLIS = 8_000L
     const val WARMUP_SAMPLE_COUNT = 4
     const val MAX_RESTART_ATTEMPTS = 1
     const val MAX_MEASUREMENTS = 60
@@ -237,13 +248,13 @@ internal object HeartRateSessionReducer {
         if (current.destroyed) return unchanged(current)
 
         return when (event) {
-            HeartRateSessionEvent.Enable -> enable(current)
+            HeartRateSessionEvent.Enable -> enable(current, nowMillis)
             HeartRateSessionEvent.Disable -> disable(current)
             is HeartRateSessionEvent.TransportConnected ->
-                transportConnected(current, event)
+                transportConnected(current, event, nowMillis)
             is HeartRateSessionEvent.TransportDisconnected ->
                 transportDisconnected(current, event)
-            is HeartRateSessionEvent.WearChanged -> wearChanged(current, event)
+            is HeartRateSessionEvent.WearChanged -> wearChanged(current, event, nowMillis)
             is HeartRateSessionEvent.SensorResourceGranted ->
                 sensorResourceGranted(current, event)
             is HeartRateSessionEvent.StartFramesSent ->
@@ -255,7 +266,7 @@ internal object HeartRateSessionReducer {
             is HeartRateSessionEvent.TransportRecoveryResult ->
                 transportRecoveryResult(current, event)
             is HeartRateSessionEvent.TransportRecoveryReady ->
-                transportRecoveryReady(current, event)
+                transportRecoveryReady(current, event, nowMillis)
             is HeartRateSessionEvent.TransportFailure ->
                 transportFailure(current, event)
             is HeartRateSessionEvent.Stop -> stop(current, event)
@@ -263,7 +274,10 @@ internal object HeartRateSessionReducer {
         }
     }
 
-    private fun enable(current: HeartRateSessionState): HeartRateSessionTransition {
+    private fun enable(
+        current: HeartRateSessionState,
+        nowMillis: Long,
+    ): HeartRateSessionTransition {
         if (current.enabled) return unchanged(current)
 
         val enabled = current.copy(enabled = true)
@@ -275,7 +289,7 @@ internal object HeartRateSessionReducer {
             !enabled.wear.isWorn -> HeartRateSessionTransition(
                 enabled.resetCapture(HeartRateSessionStatus.WAITING_TO_BE_WORN),
             )
-            else -> beginCapture(enabled, key, restartAttempts = 0)
+            else -> beginCapture(enabled, key, restartAttempts = 0, nowMillis = nowMillis)
         }
     }
 
@@ -293,6 +307,7 @@ internal object HeartRateSessionReducer {
     private fun transportConnected(
         current: HeartRateSessionState,
         event: HeartRateSessionEvent.TransportConnected,
+        nowMillis: Long,
     ): HeartRateSessionTransition {
         val currentKey = current.key
         if (currentKey != null && currentKey.matches(event.key)) {
@@ -331,7 +346,7 @@ internal object HeartRateSessionReducer {
             if (current.supportedTransport && current.wear.isWorn) {
                 return unchanged(updated)
             }
-            return beginCapture(updated, event.key, restartAttempts = 0)
+            return beginCapture(updated, event.key, restartAttempts = 0, nowMillis = nowMillis)
         }
 
         if (event.key.epoch <= current.highestEpoch) return unchanged(current)
@@ -355,7 +370,7 @@ internal object HeartRateSessionReducer {
             return HeartRateSessionTransition(connected, oldActions)
         }
 
-        val started = beginCapture(connected, event.key, restartAttempts = 0)
+        val started = beginCapture(connected, event.key, restartAttempts = 0, nowMillis = nowMillis)
         return started.copy(actions = oldActions + started.actions)
     }
 
@@ -384,6 +399,7 @@ internal object HeartRateSessionReducer {
     private fun wearChanged(
         current: HeartRateSessionState,
         event: HeartRateSessionEvent.WearChanged,
+        nowMillis: Long,
     ): HeartRateSessionTransition {
         if (!current.matches(event.key) || !current.supportedTransport) {
             return unchanged(current)
@@ -396,7 +412,7 @@ internal object HeartRateSessionReducer {
         if (!current.enabled || wasWorn == isWorn) return unchanged(updated)
 
         return if (isWorn) {
-            beginCapture(updated, event.key, restartAttempts = 0)
+            beginCapture(updated, event.key, restartAttempts = 0, nowMillis = nowMillis)
         } else {
             HeartRateSessionTransition(
                 updated.resetCapture(HeartRateSessionStatus.WAITING_TO_BE_WORN),
@@ -424,7 +440,7 @@ internal object HeartRateSessionReducer {
             return unchanged(current)
         }
 
-        if (!event.succeeded) return restartOrFail(current, event.acquisition)
+        if (!event.succeeded) return restartOrFail(current, event.acquisition, nowMillis)
 
         val watchdog = HeartRateWatchdog(
             HeartRateWatchdogKind.FIRST_SAMPLE,
@@ -493,7 +509,7 @@ internal object HeartRateSessionReducer {
 
         val watchdog = current.watchdog ?: return unchanged(current)
         if (nowMillis >= watchdog.deadlineMillis) {
-            return restartOrFail(current, event.acquisition)
+            return restartOrFail(current, event.acquisition, nowMillis)
         }
 
         val refreshedWatchdog = HeartRateWatchdog(
@@ -541,7 +557,7 @@ internal object HeartRateSessionReducer {
         if (!current.matches(event.acquisition)) return unchanged(current)
         val watchdog = current.watchdog ?: return unchanged(current)
         if (nowMillis < watchdog.deadlineMillis) return unchanged(current)
-        return restartOrFail(current, event.acquisition)
+        return restartOrFail(current, event.acquisition, nowMillis)
     }
 
     private fun retry(
@@ -561,7 +577,7 @@ internal object HeartRateSessionReducer {
             listOf(
                 HeartRateSessionAction.RequestTransportRecovery(
                     event.acquisition,
-                    HeartRateTransportRecoveryReason.USER_RETRY,
+                    event.reason,
                 )
             ),
         )
@@ -589,6 +605,7 @@ internal object HeartRateSessionReducer {
     private fun transportRecoveryReady(
         current: HeartRateSessionState,
         event: HeartRateSessionEvent.TransportRecoveryReady,
+        nowMillis: Long,
     ): HeartRateSessionTransition {
         if (!current.matches(event.acquisition) ||
             current.status != HeartRateSessionStatus.RECONNECTING ||
@@ -608,6 +625,7 @@ internal object HeartRateSessionReducer {
             event.acquisition.key,
             restartAttempts = 0,
             status = HeartRateSessionStatus.RECONNECTING,
+            nowMillis = nowMillis,
         )
     }
 
@@ -670,8 +688,13 @@ internal object HeartRateSessionReducer {
         key: HrmSessionKey,
         restartAttempts: Int,
         status: HeartRateSessionStatus = HeartRateSessionStatus.STARTING,
+        nowMillis: Long,
     ): HeartRateSessionTransition {
         val acquisition = current.nextToken(key)
+        val watchdog = HeartRateWatchdog(
+            HeartRateWatchdogKind.START_SEQUENCE_TIMEOUT,
+            deadlineAfter(nowMillis, START_SEQUENCE_TIMEOUT_MILLIS),
+        )
         return HeartRateSessionTransition(
             current.copy(
                 status = status,
@@ -680,7 +703,7 @@ internal object HeartRateSessionReducer {
                 acceptingSamples = false,
                 warmupSamplesRemaining = WARMUP_SAMPLE_COUNT,
                 restartAttempts = restartAttempts,
-                watchdog = null,
+                watchdog = watchdog,
                 measurements = emptyList(),
                 sensorResourceClaimPending = true,
                 ownsSensorResource = false,
@@ -688,6 +711,7 @@ internal object HeartRateSessionReducer {
             ),
             buildList {
                 add(HeartRateSessionAction.ClaimSensorResource(acquisition))
+                add(HeartRateSessionAction.ScheduleWatchdog(acquisition, watchdog))
                 if (current.measurements.isNotEmpty()) {
                     add(HeartRateSessionAction.ClearMeasurements(acquisition))
                 }
@@ -698,9 +722,14 @@ internal object HeartRateSessionReducer {
     private fun restartOrFail(
         current: HeartRateSessionState,
         failedAcquisition: HrmAcquisitionToken,
+        nowMillis: Long,
     ): HeartRateSessionTransition {
         if (current.restartAttempts < MAX_RESTART_ATTEMPTS) {
             val replacement = current.nextToken(failedAcquisition.key)
+            val replacementWatchdog = HeartRateWatchdog(
+                HeartRateWatchdogKind.START_SEQUENCE_TIMEOUT,
+                deadlineAfter(nowMillis, START_SEQUENCE_TIMEOUT_MILLIS),
+            )
             return HeartRateSessionTransition(
                 current.copy(
                     status = HeartRateSessionStatus.RECONNECTING,
@@ -709,7 +738,7 @@ internal object HeartRateSessionReducer {
                     acceptingSamples = false,
                     warmupSamplesRemaining = WARMUP_SAMPLE_COUNT,
                     restartAttempts = current.restartAttempts + 1,
-                    watchdog = null,
+                    watchdog = replacementWatchdog,
                     measurements = emptyList(),
                     sensorResourceClaimPending = true,
                     ownsSensorResource = false,
@@ -721,6 +750,7 @@ internal object HeartRateSessionReducer {
                         add(HeartRateSessionAction.SendStopFrames(failedAcquisition))
                     }
                     add(HeartRateSessionAction.ClaimSensorResource(replacement))
+                    add(HeartRateSessionAction.ScheduleWatchdog(replacement, replacementWatchdog))
                     if (current.measurements.isNotEmpty()) {
                         add(HeartRateSessionAction.ClearMeasurements(replacement))
                     }

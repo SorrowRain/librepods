@@ -6,7 +6,12 @@
    See https://developer.android.com/about/versions/12/backup-restore
 -->
 <full-backup-content>
+    <!-- heart_rate_private.xml holds Health Connect gating state (user may consider it sensitive);
+         settings holds AirPods proximity keys (IRK/ENC_KEY), the local MAC, and serial numbers;
+         packet_logs holds raw AACP hex. These must not leave the device in a cloud backup. -->
     <exclude domain="sharedpref" path="heart_rate_private.xml" />
+    <exclude domain="sharedpref" path="settings" />
+    <exclude domain="sharedpref" path="packet_logs" />
     <!--
    <include domain="sharedpref" path="."/>
    <exclude domain="sharedpref" path="device.xml"/>

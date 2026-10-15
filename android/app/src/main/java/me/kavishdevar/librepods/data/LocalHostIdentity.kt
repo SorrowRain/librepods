@@ -19,4 +19,10 @@ object LocalHostIdentity {
             bluetoothMacPattern.matches(it) && it !in unusableAddresses
         }
     }
+
+    fun isRemote(sender: String?, local: String?): Boolean {
+        val source = normalize(sender) ?: return false
+        val self = normalize(local) ?: return false
+        return source != self
+    }
 }

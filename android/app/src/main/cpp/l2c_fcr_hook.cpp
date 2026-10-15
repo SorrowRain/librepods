@@ -712,3 +712,8 @@ Java_me_kavishdevar_librepods_utils_NativeBridge_setA2dpStartGuardLease(
              (long long) clampedRemainingMs);
     }
 }
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_me_kavishdevar_librepods_utils_NativeBridge_isA2dpStartGuardHookInstalled(JNIEnv *, jobject) {
+    return a2dpStartHookInstalled.load(std::memory_order_relaxed) ? JNI_TRUE : JNI_FALSE;
+}

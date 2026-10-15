@@ -139,7 +139,21 @@ class PopupWindow(
 
                 val vid = mView.findViewById<VideoView>(R.id.video)
                 vid.setAudioFocusRequest(AudioManager.AUDIOFOCUS_NONE)
-                vid.setVideoPath("android.resource://me.kavishdevar.librepods/" + R.raw.connected)
+                // Restore visibility from a previous onError hide; this mView is reused across opens.
+                vid.visibility = View.VISIBLE
+                vid.setOnErrorListener { _, what, extra ->
+                    Log.e("PopupWindow", "Error playing popup video: what=$what extra=$extra")
+                    // Release the looping player and hide the view; the next open() restores it.
+                    // stopPlayback() on a player already in the Error state throws, so guard it.
+                    try {
+                        vid.stopPlayback()
+                    } catch (error: Exception) {
+                        Log.e("PopupWindow", "Error stopping popup video: ${error.message}")
+                    }
+                    vid.visibility = View.GONE
+                    true
+                }
+                vid.setVideoPath("android.resource://${context.packageName}/${R.raw.connected}")
                 vid.resolveAdjustedSize(vid.width, vid.height)
                 vid.start()
                 vid.setOnCompletionListener {

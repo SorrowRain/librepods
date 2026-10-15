@@ -1,7 +1,7 @@
 import java.util.Properties
 import java.util.zip.ZipFile
 
-val appVersionName = "1.0.2-heart-rate.2"
+val appVersionName = "1.0.2-handoff.5"
 
 plugins {
     alias(libs.plugins.android.application)
@@ -50,7 +50,7 @@ android {
     defaultConfig {
         applicationId = "me.kavishdevar.librepods"
         targetSdk = 37
-        versionCode = 79
+        versionCode = 94
         versionName = appVersionName
     }
     buildTypes {

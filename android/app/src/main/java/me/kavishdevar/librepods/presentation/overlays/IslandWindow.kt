@@ -228,6 +228,9 @@ class IslandWindow(private val context: Context) {
 
         islandView.visibility = View.VISIBLE
         containerView.visibility = View.VISIBLE
+        // A transient decode error hides the video; restore it on the next show() so a one-off
+        // error does not leave the island video permanently invisible.
+        islandView.findViewById<VideoView>(R.id.island_video_view).visibility = View.VISIBLE
 
         containerView.setOnTouchListener { _, event ->
             when (event.action) {
@@ -327,8 +330,21 @@ class IslandWindow(private val context: Context) {
             context.getString(R.string.island_connected_text)
 
         val videoView = islandView.findViewById<VideoView>(R.id.island_video_view)
-        val videoUri = "android.resource://me.kavishdevar.librepods/${R.raw.island}".toUri()
+        val videoUri = "android.resource://${context.packageName}/${R.raw.island}".toUri()
         videoView.setAudioFocusRequest(AudioManager.AUDIOFOCUS_NONE)
+        videoView.setOnErrorListener { _, what, extra ->
+            e("IslandWindow", "Error playing island video: what=$what extra=$extra")
+            // Release the (possibly looping) MediaPlayer so a decode error does not leak it,
+            // then hide the view; the next show() resets visibility. stopPlayback() on a player
+            // already in the Error state throws IllegalStateException, so guard it.
+            try {
+                videoView.stopPlayback()
+            } catch (error: Exception) {
+                e("IslandWindow", "Error stopping island video: $error")
+            }
+            videoView.visibility = View.GONE
+            true
+        }
         videoView.setVideoURI(videoUri)
         videoView.setOnPreparedListener { mediaPlayer ->
             mediaPlayer.isLooping = true
@@ -652,6 +668,13 @@ class IslandWindow(private val context: Context) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             Handler(Looper.getMainLooper()).post { cleanupAndRemoveView() }
             return
+        }
+        // Release the looping island player on every close path (close(), forceClose()) so a
+        // fling-dismiss does not leak the MediaPlayer until GC.
+        try {
+            islandView.findViewById<VideoView>(R.id.island_video_view).stopPlayback()
+        } catch (e: Exception) {
+            e("IslandWindow", "Error stopping island video: $e")
         }
         try {
             containerView.visibility = View.GONE

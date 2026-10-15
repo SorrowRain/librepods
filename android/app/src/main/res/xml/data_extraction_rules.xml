@@ -4,14 +4,17 @@
    for details.
 -->
 <data-extraction-rules>
+    <!-- Heart-rate gating prefs, AirPods proximity keys (IRK/ENC_KEY), the local MAC, serial
+         numbers, and raw AACP packet logs must not leave the device via cloud backup or the
+         device-to-device transfer on setup. -->
     <cloud-backup>
         <exclude domain="sharedpref" path="heart_rate_private.xml" />
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="sharedpref" path="settings" />
+        <exclude domain="sharedpref" path="packet_logs" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="heart_rate_private.xml" />
+        <exclude domain="sharedpref" path="settings" />
+        <exclude domain="sharedpref" path="packet_logs" />
     </device-transfer>
 </data-extraction-rules>

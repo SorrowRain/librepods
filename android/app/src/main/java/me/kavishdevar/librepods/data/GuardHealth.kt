@@ -1,5 +1,7 @@
 package me.kavishdevar.librepods.data
 
+import me.kavishdevar.librepods.audio.AudioHandoffPhase
+
 enum class GuardHealthLevel {
     /** The guard is on and every protection layer it needs is in place. */
     ACTIVE,
@@ -35,6 +37,14 @@ enum class GuardHealthReason {
 
     /** The LSPosed remote-preferences path to the Bluetooth process is unavailable. */
     NATIVE_TRANSPORT_MISSING,
+
+    /**
+     * The AudioPolicy registered but the preferred-device override was not applied, so
+     * already-playing media stalls on the AirPods instead of moving to the speaker — the guard
+     * silently stops the phone instead of protecting it. Non-blocking (the native A2DP block still
+     * runs), but the symptom is worse than a missing layer, so it degrades health.
+     */
+    PREFERRED_ROUTE_MISSING,
 }
 
 data class GuardHealth(
@@ -48,7 +58,7 @@ data class GuardHealth(
     val nativeLeaseAvailable: Boolean = false,
     val localMacResolved: Boolean = false,
     val aacpConnected: Boolean = false,
-    val guardState: RemoteDeviceAudioGuardState = RemoteDeviceAudioGuardState.OFF,
+    val guardState: AudioHandoffPhase = AudioHandoffPhase.DISCONNECTED,
 ) {
     val primaryReason: GuardHealthReason?
         get() = reasons.firstOrNull()
@@ -81,8 +91,9 @@ data class GuardHealth(
             nativeLeaseAvailable: Boolean,
             localMacResolved: Boolean,
             aacpConnected: Boolean,
-            guardState: RemoteDeviceAudioGuardState,
+            guardState: AudioHandoffPhase,
             preferredRouteApplied: Boolean = false,
+            protectionFailed: Boolean = false,
         ): GuardHealth {
             val reasons = mutableListOf<GuardHealthReason>()
             if (!enabled) {
@@ -102,11 +113,21 @@ data class GuardHealth(
 
             // Ordered most severe first: each of these alone means no protection at all.
             if (barrierState == "permission_missing") reasons += GuardHealthReason.PERMISSION_MISSING
-            if (barrierState in failedBarrierStates) reasons += GuardHealthReason.BARRIER_FAILED
+            if (barrierState in failedBarrierStates || protectionFailed) reasons += GuardHealthReason.BARRIER_FAILED
             if (barrierState in stuckBarrierStates) reasons += GuardHealthReason.BARRIER_STUCK
             if (!localMacResolved) reasons += GuardHealthReason.LOCAL_MAC_UNKNOWN
             val blocking = reasons.isNotEmpty()
             if (!nativeLeaseAvailable) reasons += GuardHealthReason.NATIVE_TRANSPORT_MISSING
+            // A registered-but-not-preferred barrier silently stalls already-playing media instead
+            // of moving it to the speaker. Only relevant when the barrier is actually supposed to
+            // be protecting (a barrier-enabled guard state with a registered policy).
+            val barrierEnabledState = guardState == AudioHandoffPhase.REMOTE
+            if (barrierEnabledState &&
+                barrierState == "registered" &&
+                !preferredRouteApplied
+            ) {
+                reasons += GuardHealthReason.PREFERRED_ROUTE_MISSING
+            }
 
             val level = when {
                 blocking -> GuardHealthLevel.INACTIVE

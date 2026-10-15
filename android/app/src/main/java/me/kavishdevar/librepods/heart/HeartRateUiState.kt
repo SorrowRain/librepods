@@ -34,10 +34,13 @@ public data class HeartRateUiState(
     val status: HeartRateUiStatus = HeartRateUiStatus.OFF,
     val latestBpm: Int? = null,
     val sampleFreshness: HeartRateSampleFreshness = HeartRateSampleFreshness.NO_SAMPLE,
+    val autoRetryPaused: Boolean = false,
+    val autoRetryAttempt: Int = 0,
 ) {
     override fun toString(): String =
         "HeartRateUiState(supported=$supported, enabled=$enabled, status=$status, " +
-            "latestBpm=redacted, sampleFreshness=$sampleFreshness)"
+            "latestBpm=redacted, sampleFreshness=$sampleFreshness, " +
+            "autoRetryPaused=$autoRetryPaused, autoRetryAttempt=$autoRetryAttempt)"
 }
 
 internal object HeartRateUiStateMapper {
@@ -47,6 +50,8 @@ internal object HeartRateUiStateMapper {
         eligibility: HeartRateEligibilityState,
         session: HeartRateSessionState,
         nowElapsedRealtimeMillis: Long,
+        autoRetryPaused: Boolean = false,
+        autoRetryAttempt: Int = 0,
     ): HeartRateUiState {
         val status = session.status.toUiStatus()
         val mayExposeSample = eligibility.supported &&
@@ -65,6 +70,8 @@ internal object HeartRateUiStateMapper {
             else -> HeartRateSampleFreshness.STALE
         }
 
+        val inFailedState = session.enabled &&
+            session.status == HeartRateSessionStatus.COULDNT_START
         return HeartRateUiState(
             supported = eligibility.featureVisible,
             enabled = session.enabled,
@@ -73,6 +80,8 @@ internal object HeartRateUiStateMapper {
                 freshness == HeartRateSampleFreshness.FRESH
             },
             sampleFreshness = freshness,
+            autoRetryPaused = autoRetryPaused && inFailedState,
+            autoRetryAttempt = autoRetryAttempt.takeIf { inFailedState } ?: 0,
         )
     }
 

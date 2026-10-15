@@ -41,6 +41,8 @@ import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam;
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam;
 
 public class XiaomiFixModule extends XposedModule {
+    // Known limitation: resource-authority matching targets single-user MIUI/HyperOS devices and
+    // does not handle work-profile authority suffixes (e.g. ":10").
     private static final String TAG = "LibrePodsXiaomiFix";
 
     static {

@@ -86,6 +86,8 @@ data class AirPodsUiState(
     val headGesturesEnabled: Boolean = true,
     val heartRateState: HeartRateUiState = HeartRateUiState(),
     val healthConnectExportState: HealthConnectExportState = HealthConnectExportState(),
+    val heartRateAutoRetryEnabled: Boolean = true,
+    val heartRateRespectRemoteAudioGuard: Boolean = true,
 
     val eqData: FloatArray = floatArrayOf(),
 
@@ -247,6 +249,8 @@ class AirPodsViewModel(
     private var heartRateStateJob: Job? = null
     private var headTrackingStateJob: Job? = null
     private var healthConnectStateJob: Job? = null
+    private var heartRateAutoRetryJob: Job? = null
+    private var heartRateRespectGuardJob: Job? = null
 
 //    private val _cameraAction = MutableStateFlow(
 //        sharedPreferences.getString("camera_action", null)
@@ -288,6 +292,8 @@ class AirPodsViewModel(
         heartRateStateJob?.cancel()
         headTrackingStateJob?.cancel()
         healthConnectStateJob?.cancel()
+        heartRateAutoRetryJob?.cancel()
+        heartRateRespectGuardJob?.cancel()
         listeners.forEach { (id, listener) ->
             controlRepo.remove(id, listener)
         }
@@ -349,6 +355,24 @@ class AirPodsViewModel(
             boundService.healthConnectExportState.collect { exportState ->
                 if (!isDemoMode) {
                     _uiState.update { it.copy(healthConnectExportState = exportState) }
+                }
+            }
+        }
+
+        heartRateAutoRetryJob?.cancel()
+        heartRateAutoRetryJob = viewModelScope.launch {
+            boundService.heartRateAutoRetryEnabledState.collect { enabled ->
+                if (!isDemoMode) {
+                    _uiState.update { it.copy(heartRateAutoRetryEnabled = enabled) }
+                }
+            }
+        }
+
+        heartRateRespectGuardJob?.cancel()
+        heartRateRespectGuardJob = viewModelScope.launch {
+            boundService.heartRateRespectRemoteAudioGuardState.collect { enabled ->
+                if (!isDemoMode) {
+                    _uiState.update { it.copy(heartRateRespectRemoteAudioGuard = enabled) }
                 }
             }
         }
@@ -690,6 +714,16 @@ class AirPodsViewModel(
 
     fun setHeartRateMonitoringEnabled(enabled: Boolean) {
         if (!isDemoMode) service.setHeartRateMonitoringEnabled(enabled)
+    }
+
+    fun setHeartRateAutoRetryEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(heartRateAutoRetryEnabled = enabled) }
+        if (!isDemoMode) service.setHeartRateAutoRetryEnabled(enabled)
+    }
+
+    fun setHeartRateRespectRemoteAudioGuardEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(heartRateRespectRemoteAudioGuard = enabled) }
+        if (!isDemoMode) service.setHeartRateRespectRemoteAudioGuardEnabled(enabled)
     }
 
     fun retryHeartRateMonitoring() {

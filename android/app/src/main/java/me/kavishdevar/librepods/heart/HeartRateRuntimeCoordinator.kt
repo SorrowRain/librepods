@@ -11,6 +11,8 @@
 package me.kavishdevar.librepods.heart
 
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.pow
+import kotlin.math.roundToLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -75,7 +77,14 @@ internal class HeartRateRuntimeCoordinator(
     private val sink: HeartRateRuntimeSink,
     private val elapsedRealtimeMillis: () -> Long,
     private val suspendDelay: suspend (Long) -> Unit = { delay(it) },
+    private val autoRetryEnabled: () -> Boolean = { true },
+    private val autoRetrySuppressed: () -> Boolean = { false },
+    private val watchdogScope: CoroutineScope = scope,
 ) {
+    private val autoRetryBaseQuietPeriodMillis = 3_000L
+    private val autoRetryMaxQuietPeriodMillis = 15_000L
+    private val autoRetryQuietPeriodGrowthFactor = 1.6
+
     private val mutex = Mutex()
     private val headTrackingClaims = HeadTrackingClaimController()
     private var eligibilityState = HeartRateEligibilityState()
@@ -83,6 +92,27 @@ internal class HeartRateRuntimeCoordinator(
     private var arbiterState = SensorResourceArbiterState()
     private val startJobs = mutableMapOf<HrmAcquisitionToken, Job>()
     private val watchdogJobs = mutableMapOf<HrmAcquisitionToken, Job>()
+    private var autoRetryJob: Job? = null
+    private var autoRetryAttempt = 0
+    private var lastAutoRetryAcquisition: HrmAcquisitionToken? = null
+
+    /**
+     * The retry loop stays unbounded (the user wants a dead sensor to keep trying, never silently
+     * stop), but the quiet period backs off so a transport that cannot recover stops hammering the
+     * shared AACP socket every 3s. Backoff is exponential, capped at [autoRetryMaxQuietPeriodMillis],
+     * and resets to the base delay once the session leaves the failing state.
+     */
+    private fun autoRetryQuietPeriodMillis(attempt: Int): Long {
+        // attempt = number of failed auto retries so far (0 before the first failure).
+        // The quiet period grows with each failure so a transport that cannot recover stops
+        // hammering the shared AACP socket every 3s, capped at autoRetryMaxQuietPeriodMillis.
+        val grown = autoRetryBaseQuietPeriodMillis *
+            (autoRetryQuietPeriodGrowthFactor.toDouble().pow(attempt))
+        return grown.roundToLong().coerceIn(
+            autoRetryBaseQuietPeriodMillis,
+            autoRetryMaxQuietPeriodMillis,
+        )
+    }
 
     private val _session = MutableStateFlow(sessionState)
     val session: StateFlow<HeartRateSessionState> = _session.asStateFlow()
@@ -191,7 +221,26 @@ internal class HeartRateRuntimeCoordinator(
         scope.launch {
             mutex.withLock {
                 val acquisition = sessionState.acquisition ?: return@withLock
-                applySessionEventLocked(HeartRateSessionEvent.Retry(acquisition))
+                applySessionEventLocked(
+                    HeartRateSessionEvent.Retry(
+                        acquisition,
+                        HeartRateTransportRecoveryReason.USER_RETRY,
+                    )
+                )
+            }
+        }
+    }
+
+    /**
+     * Re-evaluates auto retry when conditions outside session events change, e.g. another host
+     * starts or stops owning the AirPods audio. A pending retry is cancelled while suppressed and
+     * re-armed once the gate opens.
+     */
+    fun refreshAutoRetryGate() {
+        scope.launch {
+            mutex.withLock {
+                updateAutoRetryLocked(sessionState)
+                updatePresentationLocked()
             }
         }
     }
@@ -311,6 +360,7 @@ internal class HeartRateRuntimeCoordinator(
             startJobs.clear()
             watchdogJobs.values.forEach(Job::cancel)
             watchdogJobs.clear()
+            cancelAutoRetryLocked()
             freshnessJob?.cancel()
             freshnessJob = null
             updatePresentationLocked()
@@ -337,6 +387,7 @@ internal class HeartRateRuntimeCoordinator(
         _session.value = sessionState
         updatePresentationLocked()
         transition.actions.forEach(::executeSessionActionLocked)
+        updateAutoRetryLocked(sessionState)
     }
 
     private fun executeSessionActionLocked(action: HeartRateSessionAction) {
@@ -407,7 +458,7 @@ internal class HeartRateRuntimeCoordinator(
         quietPeriodMillis: Long,
     ) {
         startJobs.remove(acquisition)?.cancel()
-        val job = scope.launch(start = CoroutineStart.LAZY) {
+        val job = watchdogScope.launch(start = CoroutineStart.LAZY) {
             val succeeded = try {
                 if (quietPeriodMillis > 0L) suspendDelay(quietPeriodMillis)
                 sink.startHeartRate(acquisition) {
@@ -429,6 +480,15 @@ internal class HeartRateRuntimeCoordinator(
         job.start()
     }
 
+    /**
+     * Stops the transport synchronously while holding the mutex. This is a deliberate trade-off:
+     * the reducer emits STOP then START (restartOrFail, transportFailure) and relies on the old
+     * STOP write completing before the new START acquires the sensor resource. Deferring STOP off
+     * the mutex would let a stale sensor keep streaming under a replacement acquisition. The
+     * synchronous write is bounded in practice by the L2CAP socket's own buffering and by the
+     * reconnect/watchdog path closing a stalled socket; see HeartRateSession for the documented
+     * limitation.
+     */
     private fun stopTransportLocked(acquisition: HrmAcquisitionToken) {
         startJobs.remove(acquisition)?.cancel()
         cancelWatchdogLocked(acquisition)
@@ -440,7 +500,7 @@ internal class HeartRateRuntimeCoordinator(
         watchdog: HeartRateWatchdog,
     ) {
         cancelWatchdogLocked(acquisition)
-        val job = scope.launch(start = CoroutineStart.LAZY) {
+        val job = watchdogScope.launch(start = CoroutineStart.LAZY) {
             suspendDelay((watchdog.deadlineMillis - elapsedRealtimeMillis()).coerceAtLeast(0L))
             mutex.withLock {
                 watchdogJobs.remove(acquisition)
@@ -455,9 +515,70 @@ internal class HeartRateRuntimeCoordinator(
         watchdogJobs.remove(acquisition)?.cancel()
     }
 
+    private fun updateAutoRetryLocked(state: HeartRateSessionState) {
+        val acquisition = state.acquisition
+        // Reset the backoff only on a genuinely new episode: a sustained LIVE reading or a fresh
+        // acquisition (wear change / new connection, which mints a new token via beginCapture).
+        // CALIBRATING (the first warmup sample) is deliberately NOT a reset — a device that
+        // streams a few samples then dies should keep backing off rather than hammering the shared
+        // AACP socket at the base 3s forever. RECONNECTING is excluded: a recovery is in flight.
+        if (state.status == HeartRateSessionStatus.LIVE ||
+            (state.acquisition != null && state.acquisition != lastAutoRetryAcquisition)
+        ) {
+            autoRetryAttempt = 0
+            lastAutoRetryAcquisition = state.acquisition
+        }
+        val shouldAutoRetry = !state.destroyed &&
+            state.enabled &&
+            state.supportedTransport &&
+            state.wear.isWorn &&
+            state.status == HeartRateSessionStatus.COULDNT_START &&
+            autoRetryEnabled() &&
+            !autoRetrySuppressed() &&
+            acquisition != null
+        if (!shouldAutoRetry) {
+            cancelAutoRetryLocked()
+            return
+        }
+        if (autoRetryJob?.isActive == true) return
+
+        val quietPeriodMillis = autoRetryQuietPeriodMillis(autoRetryAttempt)
+        val job = watchdogScope.launch(start = CoroutineStart.LAZY) {
+            suspendDelay(quietPeriodMillis)
+            mutex.withLock {
+                autoRetryJob = null
+                val current = sessionState
+                if (!current.destroyed &&
+                    current.enabled &&
+                    current.supportedTransport &&
+                    current.wear.isWorn &&
+                    current.status == HeartRateSessionStatus.COULDNT_START &&
+                    autoRetryEnabled() &&
+                    !autoRetrySuppressed() &&
+                    acquisitionSnapshot?.matches(acquisition) == true
+                ) {
+                    autoRetryAttempt++
+                    applySessionEventLocked(
+                        HeartRateSessionEvent.Retry(
+                            acquisition,
+                            HeartRateTransportRecoveryReason.AUTO_RETRY,
+                        )
+                    )
+                }
+            }
+        }
+        autoRetryJob = job
+        job.start()
+    }
+
+    private fun cancelAutoRetryLocked() {
+        autoRetryJob?.cancel()
+        autoRetryJob = null
+    }
+
     private fun scheduleFreshnessUpdateLocked(acquisition: HrmAcquisitionToken) {
         freshnessJob?.cancel()
-        val job = scope.launch(start = CoroutineStart.LAZY) {
+        val job = watchdogScope.launch(start = CoroutineStart.LAZY) {
             suspendDelay(HeartRateUiStateMapper.LIVE_SAMPLE_FRESHNESS_MILLIS + 1L)
             mutex.withLock {
                 if (acquisitionSnapshot?.matches(acquisition) == true) {
@@ -474,6 +595,8 @@ internal class HeartRateRuntimeCoordinator(
             eligibility = eligibilityState,
             session = sessionState,
             nowElapsedRealtimeMillis = elapsedRealtimeMillis(),
+            autoRetryPaused = autoRetryEnabled() && autoRetrySuppressed(),
+            autoRetryAttempt = autoRetryAttempt.takeIf { autoRetryEnabled() } ?: 0,
         )
     }
 

@@ -18,4 +18,5 @@
     <string name="health_connect_status_ready">已授予写入权限，导出仍为关闭状态。</string>
     <string name="health_connect_status_enabled">心率导出已开启。</string>
     <string name="health_connect_status_error">健康数据中心暂时不可用，导出将自动重试。</string>
+    <string name="health_connect_dropped_measurements">健康数据中心繁忙时有 %1$d 个心率样本被丢弃，部分历史记录可能缺失。</string>
 </resources>

@@ -40,7 +40,13 @@ class HeartRateSessionTest {
         assertEquals(1L, acquisition.acquisition)
         assertEquals(HeartRateSessionStatus.STARTING, confirmed.state.status)
         assertEquals(
-            listOf(HeartRateSessionAction.ClaimSensorResource(acquisition)),
+            listOf(
+                HeartRateSessionAction.ClaimSensorResource(acquisition),
+                HeartRateSessionAction.ScheduleWatchdog(
+                    acquisition,
+                    startSequenceWatchdog(nowMillis = 0L),
+                ),
+            ),
             confirmed.actions,
         )
         assertFalse(HeartRateSessionAction.SendStartFrames(acquisition) in confirmed.actions)
@@ -76,7 +82,13 @@ class HeartRateSessionTest {
         state = worn.state
         val acquisition = state.requireAcquisition()
         assertEquals(
-            listOf(HeartRateSessionAction.ClaimSensorResource(acquisition)),
+            listOf(
+                HeartRateSessionAction.ClaimSensorResource(acquisition),
+                HeartRateSessionAction.ScheduleWatchdog(
+                    acquisition,
+                    startSequenceWatchdog(nowMillis = 0L),
+                ),
+            ),
             worn.actions,
         )
 
@@ -213,6 +225,10 @@ class HeartRateSessionTest {
                 HeartRateSessionAction.CancelWatchdog(first),
                 HeartRateSessionAction.SendStopFrames(first),
                 HeartRateSessionAction.ClaimSensorResource(second),
+                HeartRateSessionAction.ScheduleWatchdog(
+                    second,
+                    startSequenceWatchdog(nowMillis = 8_100L),
+                ),
             ),
             retry.actions,
         )
@@ -261,7 +277,13 @@ class HeartRateSessionTest {
         assertTrue(replacement.acquisition > second.acquisition)
         assertEquals(HeartRateSessionStatus.RECONNECTING, ready.state.status)
         assertEquals(
-            listOf(HeartRateSessionAction.ClaimSensorResource(replacement)),
+            listOf(
+                HeartRateSessionAction.ClaimSensorResource(replacement),
+                HeartRateSessionAction.ScheduleWatchdog(
+                    replacement,
+                    startSequenceWatchdog(nowMillis = 0L),
+                ),
+            ),
             ready.actions,
         )
 
@@ -451,7 +473,10 @@ class HeartRateSessionTest {
         staleTokens.forEach { stale ->
             val ignoredRetry = reduce(
                 failed.state,
-                HeartRateSessionEvent.Retry(stale),
+                HeartRateSessionEvent.Retry(
+                    stale,
+                    HeartRateTransportRecoveryReason.USER_RETRY,
+                ),
             )
             assertSame(failed.state, ignoredRetry.state)
         }
@@ -532,6 +557,10 @@ class HeartRateSessionTest {
                 HeartRateSessionAction.CancelWatchdog(first),
                 HeartRateSessionAction.SendStopFrames(first),
                 HeartRateSessionAction.ClaimSensorResource(replacement),
+                HeartRateSessionAction.ScheduleWatchdog(
+                    replacement,
+                    startSequenceWatchdog(nowMillis = state.watchdog.deadlineMillis),
+                ),
             ),
             timedOut.actions,
         )
@@ -565,7 +594,13 @@ class HeartRateSessionTest {
         val replacement = enabled.state.requireAcquisition()
         assertTrue(replacement.acquisition > acquisition.acquisition)
         assertEquals(
-            listOf(HeartRateSessionAction.ClaimSensorResource(replacement)),
+            listOf(
+                HeartRateSessionAction.ClaimSensorResource(replacement),
+                HeartRateSessionAction.ScheduleWatchdog(
+                    replacement,
+                    startSequenceWatchdog(nowMillis = 0L),
+                ),
+            ),
             enabled.actions,
         )
     }
@@ -677,4 +712,9 @@ class HeartRateSessionTest {
         HeartRateSessionEvent.StartFramesSent(acquisition, succeeded = true),
         nowMillis,
     ).state
+
+    private fun startSequenceWatchdog(nowMillis: Long) = HeartRateWatchdog(
+        HeartRateWatchdogKind.START_SEQUENCE_TIMEOUT,
+        nowMillis + HeartRateSessionReducer.START_SEQUENCE_TIMEOUT_MILLIS,
+    )
 }

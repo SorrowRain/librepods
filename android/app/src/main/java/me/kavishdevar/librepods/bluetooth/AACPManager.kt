@@ -298,6 +298,7 @@ class AACPManager {
             connectedDevices: List<ConnectedDevice>,
             expectedLease: AacpSocketLease,
         )
+        fun onAACPFrameReceived() {}
         fun onOwnershipToFalseRequest(
             sender: String,
             reasonReverseTapped: Boolean,
@@ -517,6 +518,7 @@ class AACPManager {
             }
             return
         }
+        callback?.onAACPFrameReceived()
 
         when (val opcode = packet[4]) {
             Opcodes.BATTERY_INFO -> {
@@ -722,9 +724,14 @@ class AACPManager {
             }
 
             Opcodes.INFORMATION -> {
-                Log.d(TAG, "Parsing Information Packet")
-                val information = parseInformationPacket(packet)
-                callback?.onDeviceInformationReceived(information, expectedLease)
+                // A passthrough fragment of exactly the 6-byte header+opcode (or a zero payload)
+                // is not a valid device-info frame; parseInformationPacket would crash on it. Skip
+                // instead of treating it as a disconnect.
+                if (packet.size >= 8) {
+                    Log.d(TAG, "Parsing Information Packet")
+                    val information = parseInformationPacket(packet)
+                    callback?.onDeviceInformationReceived(information, expectedLease)
+                }
             }
 
             Opcodes.CUSTOM_EQ -> {
@@ -1331,7 +1338,11 @@ class AACPManager {
             strings.add(str)
         }
 
-        strings.removeAt(0) // I'm too lazy to adjust, just removing the first empty string
+        // Drop the leading empty string produced by the delimiter scan; guard against a
+        // zero-length payload so a malformed frame degrades to empty fields instead of crashing.
+        if (strings.isNotEmpty()) {
+            strings.removeAt(0)
+        }
 
         return AirPodsInformation(
             name = strings.getOrNull(0) ?: "",

@@ -312,13 +312,19 @@ class SensorResourceArbiterTest {
 
         val staleRetry = sessionReduce(
             session,
-            HeartRateSessionEvent.Retry(first),
+            HeartRateSessionEvent.Retry(
+                first,
+                HeartRateTransportRecoveryReason.USER_RETRY,
+            ),
         )
         assertSame(session, staleRetry.state)
 
         transition = sessionReduce(
             session,
-            HeartRateSessionEvent.Retry(second),
+            HeartRateSessionEvent.Retry(
+                second,
+                HeartRateTransportRecoveryReason.USER_RETRY,
+            ),
         )
         assertSame(session, transition.state)
         assertEquals(

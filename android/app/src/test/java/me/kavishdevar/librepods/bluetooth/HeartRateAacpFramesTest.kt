@@ -43,7 +43,7 @@ class HeartRateAacpFramesTest {
             steps[2].packet,
         )
         assertContentEquals(bytes("04 00 04 00 01 00 00"), steps[3].packet)
-        assertContentEquals(bytes("04 00 04 00 09 00 2D 01 00 00 00"), steps[4].packet)
+        assertContentEquals(bytes("04 00 04 00 09 00 30 01 00 00 00"), steps[4].packet)
         assertContentEquals(
             bytes(
                 "04 00 04 00 17 00 00 00 10 00 10 00 " +

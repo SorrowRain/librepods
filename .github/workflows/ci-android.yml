@@ -145,9 +145,9 @@ jobs:
       - id: changelog
         run: |
           if [ -z "${{ steps.prev.outputs.tag }}" ]; then
-            NOTES=$(git log --pretty=format:"- %s ([%h](https://github.com/kavishdevar/librepods/commit/%H))")
+            NOTES=$(git log --pretty=format:"- %s ([%h](https://github.com/$GITHUB_REPOSITORY/commit/%H))")
           else
-            NOTES=$(git log ${{ steps.prev.outputs.tag }}..HEAD --pretty=format:"- %s ([%h](https://github.com/kavishdevar/librepods/commit/%H))")
+            NOTES=$(git log ${{ steps.prev.outputs.tag }}..HEAD --pretty=format:"- %s ([%h](https://github.com/$GITHUB_REPOSITORY/commit/%H))")
           fi
           echo "notes<<EOF" >> $GITHUB_OUTPUT
           echo "$NOTES" >> $GITHUB_OUTPUT
@@ -198,13 +198,13 @@ jobs:
                       "type": 2,
                       "label": "Download Release APK",
                       "style": 5,
-                      "url": "https://github.com/kavishdevar/librepods/releases/download/nightly-${{ needs.build.outputs.short_sha }}/LibrePods-FOSS-v${{ needs.build.outputs.app_version }}-release.apk"
+                      "url": "https://github.com/${{ github.repository }}/releases/download/nightly-${{ needs.build.outputs.short_sha }}/LibrePods-FOSS-v${{ needs.build.outputs.app_version }}-release.apk"
                     },
                     {
                       "type": 2,
                       "label": "Download Debug APK",
                       "style": 5,
-                      "url": "https://github.com/kavishdevar/librepods/releases/download/nightly-${{ needs.build.outputs.short_sha }}/LibrePods-FOSS-v${{ needs.build.outputs.app_version }}-debug.apk"
+                      "url": "https://github.com/${{ github.repository }}/releases/download/nightly-${{ needs.build.outputs.short_sha }}/LibrePods-FOSS-v${{ needs.build.outputs.app_version }}-debug.apk"
                     }
                   ]
                 }

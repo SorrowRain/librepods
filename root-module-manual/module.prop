@@ -1,6 +1,6 @@
 id=librepods
 name=LibrePods
-version=v1.0.2-heart-rate.2
-versionCode=79
+version=v1.0.2-handoff.5
+versionCode=94
 author=@kavishdevar
 description=Installs LibrePods as a system app, grants private audio-routing permissions, and provides Bluetooth and head-tracker helpers.

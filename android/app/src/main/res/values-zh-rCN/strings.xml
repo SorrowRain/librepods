@@ -38,6 +38,8 @@
     <string name="relative_conversational_awareness_volume_description">降低到当前音量的百分比，而不是最大音量。</string>
     <string name="conversational_awareness_pause_music">暂停音乐</string>
     <string name="conversational_awareness_pause_music_description">当你开始说话时，音乐会自动暂停。</string>
+    <string name="conversational_awareness_both_pods_only">双耳佩戴时启用</string>
+    <string name="conversational_awareness_both_pods_only_description">仅当两只 AirPods 都在耳内时才触发对话感知；单耳佩戴时同时抑制暂停音乐动作。</string>
     <string name="appwidget_text">示例</string>
     <string name="add_widget">添加小组件</string>
     <string name="noise_control_widget_description">直接在主屏幕上控制听音模式。</string>
@@ -211,7 +213,13 @@
     <string name="heart_rate_status_live">实时</string>
     <string name="heart_rate_status_reconnecting">正在重新连接</string>
     <string name="heart_rate_status_couldnt_start">无法启动</string>
+    <string name="heart_rate_retry_paused_by_remote_audio">另一个设备正在播放音频，自动重试已暂停。仍可手动重试</string>
+    <string name="heart_rate_retry_in_progress">正在自动重试（%1$d）</string>
     <string name="heart_rate_try_again">重试</string>
+    <string name="heart_rate_auto_retry">自动重试</string>
+    <string name="heart_rate_auto_retry_description">心率启动失败时自动重试，逐步退避直至恢复</string>
+    <string name="heart_rate_respect_remote_audio_guard">其他设备播放音频时暂停重试</string>
+    <string name="heart_rate_respect_remote_audio_guard_description">在其他设备使用 AirPods 音频前，等待其结束再自动重试</string>
     <string name="heart_rate_unavailable">当前没有已确认支持心率监测的 AirPods Pro 3 连接。</string>
     <string name="spatial_audio">空间音频</string>
     <string name="spatial_audio_mode_description">选择关闭空间音频、让声场随头部移动，或通过头部追踪将声场锚定在手机方向。</string>
@@ -226,4 +234,18 @@
     <string name="spatial_audio_platform_unavailable">当前 Android 音频系统没有兼容的 Spatializer。</string>
     <string name="update_remote_device_audio_guard">其他设备音频保护</string>
     <string name="update_remote_device_audio_guard_description">当另一台已连接设备正在使用 AirPods 时，Android 媒体和短提示音会留在手机上，不再抢走耳机。第一阶段不会处理电话及应用通话音频。</string>
+    <string name="audio_handoff_take_phone">切换到手机</string>
+    <string name="audio_handoff_cancel">取消切换</string>
+    <string name="audio_handoff_tile_switching">正在切换…</string>
+    <string name="audio_handoff_tile_retry">切换未完成，点按重试</string>
+    <string name="audio_handoff_tile_remote">其他设备正在使用</string>
+    <string name="audio_handoff_service_unavailable">请先打开 LibrePods</string>
+    <string name="audio_handoff_switching">正在将音频切换到手机…</string>
+    <string name="audio_handoff_failed">尚未确认音频切换成功，可重试或在系统音频设置中选择耳机。</string>
+    <string name="audio_handoff_remote">正在保护另一台设备的音频</string>
+    <string name="audio_handoff_phone">手机正在使用耳机</string>
+    <string name="audio_handoff_disconnected">耳机未连接</string>
+    <string name="audio_handoff_ready">可在手机使用耳机</string>
+    <string name="audio_handoff_copy_diagnostics">复制切换诊断</string>
+    <string name="audio_handoff_diagnostics_copied">切换诊断已复制</string>
 </resources>

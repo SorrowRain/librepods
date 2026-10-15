@@ -35,6 +35,8 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.MEDIA_CONTENT_CONTROL"
+        tools:ignore="ProtectedPermissions" />
     <uses-permission
         android:name="android.permission.MODIFY_AUDIO_ROUTING"
         tools:ignore="ProtectedPermissions" />
@@ -52,6 +54,7 @@
 
     <application
         android:name=".LibrePodsApplication"
+        android:usesNonSdkApi="true"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true"
@@ -141,6 +144,19 @@
             android:exported="true"
             android:foregroundServiceType="connectedDevice"
             android:permission="android.permission.BLUETOOTH_CONNECT" />
+        <service
+            android:name=".services.AudioHandoffTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_audio_handoff"
+            android:label="@string/audio_handoff_take_phone"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <receiver
+            android:name=".receivers.AudioHandoffActionReceiver"
+            android:exported="false" />
         <service
             android:name=".services.AirPodsQSService"
             android:exported="true"

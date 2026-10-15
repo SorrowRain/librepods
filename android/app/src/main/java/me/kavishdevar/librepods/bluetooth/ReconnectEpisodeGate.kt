@@ -1,5 +1,7 @@
 package me.kavishdevar.librepods.bluetooth
 
+import me.kavishdevar.librepods.heart.HeartRateTransportRecoveryReason
+
 internal data class ProfileRepairPermit(
     val generation: Long,
     val attempt: Int,
@@ -18,7 +20,7 @@ internal data class InitialReconnectPermit(
 internal data class HeartRateRecoveryPermit(
     val generation: Long,
     val attempt: Int,
-    val userInitiated: Boolean,
+    val reason: HeartRateTransportRecoveryReason,
 )
 
 /** Bounds reconnect work to one physical AirPods presence episode. */
@@ -41,6 +43,7 @@ internal class ReconnectEpisodeGate(
     private var heartRateTransportResets = 0
     private var automaticHeartRateRecoveryAttempts = 0
     private var manualHeartRateRecoveryAttempts = 0
+    private var autoRetryHeartRateRecoveryAttempts = 0
 
     init {
         require(maxInitialConnectAttempts > 0)
@@ -117,17 +120,38 @@ internal class ReconnectEpisodeGate(
      * episode; explicit Retry taps have a separate small budget and still use the lifecycle gate.
      */
     @Synchronized
-    fun tryBeginHeartRateRecovery(userInitiated: Boolean): HeartRateRecoveryPermit? {
-        val attempt = if (userInitiated) {
-            if (manualHeartRateRecoveryAttempts >= maxManualHeartRateRecoveryAttempts) return null
-            ++manualHeartRateRecoveryAttempts
-        } else {
-            if (automaticHeartRateRecoveryAttempts >= maxAutomaticHeartRateRecoveryAttempts) {
-                return null
+    fun tryBeginHeartRateRecovery(
+        reason: HeartRateTransportRecoveryReason,
+    ): HeartRateRecoveryPermit? {
+        val attempt = when (reason) {
+            // An explicit user retry must always be honored. Reset both budgets so every manual
+            // tap can restart a session that previously exhausted its recovery permits.
+            HeartRateTransportRecoveryReason.USER_RETRY -> {
+                automaticHeartRateRecoveryAttempts = 0
+                manualHeartRateRecoveryAttempts = 0
+                ++manualHeartRateRecoveryAttempts
             }
-            ++automaticHeartRateRecoveryAttempts
+            // The 3s auto retry loop is unbounded by design; the coordinator's audio gate decides
+            // when it may run, so it uses its own counter and never touches the failure budgets.
+            HeartRateTransportRecoveryReason.AUTO_RETRY -> {
+                ++autoRetryHeartRateRecoveryAttempts
+            }
+            HeartRateTransportRecoveryReason.AUTOMATIC -> {
+                if (automaticHeartRateRecoveryAttempts >= maxAutomaticHeartRateRecoveryAttempts) {
+                    return null
+                }
+                ++automaticHeartRateRecoveryAttempts
+            }
         }
-        return HeartRateRecoveryPermit(generation, attempt, userInitiated)
+        return HeartRateRecoveryPermit(generation, attempt, reason)
+    }
+
+    /** Lets a working HRM session recover from later transient failures without reconnecting. */
+    @Synchronized
+    fun resetHeartRateRecoveryBudget() {
+        automaticHeartRateRecoveryAttempts = 0
+        manualHeartRateRecoveryAttempts = 0
+        autoRetryHeartRateRecoveryAttempts = 0
     }
 
     @Synchronized
@@ -146,5 +170,6 @@ internal class ReconnectEpisodeGate(
         heartRateTransportResets = 0
         automaticHeartRateRecoveryAttempts = 0
         manualHeartRateRecoveryAttempts = 0
+        autoRetryHeartRateRecoveryAttempts = 0
     }
 }

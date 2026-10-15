@@ -1,5 +1,6 @@
 package me.kavishdevar.librepods.bluetooth
 
+import me.kavishdevar.librepods.heart.HeartRateTransportRecoveryReason
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -90,26 +91,59 @@ class ReconnectEpisodeGateTest {
     }
 
     @Test
-    fun `automatic and user heart rate recovery budgets are independent and non refundable`() {
+    fun `automatic heart rate recovery is bounded and user retries always refresh the budget`() {
         val gate = ReconnectEpisodeGate(
             maxAutomaticHeartRateRecoveryAttempts = 1,
             maxManualHeartRateRecoveryAttempts = 2,
         )
 
-        val automatic = assertNotNull(gate.tryBeginHeartRateRecovery(userInitiated = false))
-        assertEquals(false, automatic.userInitiated)
-        assertNull(gate.tryBeginHeartRateRecovery(userInitiated = false))
+        val automatic = assertNotNull(
+            gate.tryBeginHeartRateRecovery(HeartRateTransportRecoveryReason.AUTOMATIC)
+        )
+        assertEquals(HeartRateTransportRecoveryReason.AUTOMATIC, automatic.reason)
+        assertNull(
+            gate.tryBeginHeartRateRecovery(HeartRateTransportRecoveryReason.AUTOMATIC)
+        )
 
-        repeat(2) { attempt ->
-            val manual = assertNotNull(gate.tryBeginHeartRateRecovery(userInitiated = true))
-            assertEquals(attempt + 1, manual.attempt)
-            assertEquals(true, manual.userInitiated)
+        repeat(5) {
+            val manual = assertNotNull(
+                gate.tryBeginHeartRateRecovery(HeartRateTransportRecoveryReason.USER_RETRY)
+            )
+            assertEquals(1, manual.attempt)
+            assertEquals(HeartRateTransportRecoveryReason.USER_RETRY, manual.reason)
         }
-        assertNull(gate.tryBeginHeartRateRecovery(userInitiated = true))
+
+        // A user retry refreshes the automatic budget too, so a working session can auto-recover
+        // after a later transient failure.
+        assertNotNull(gate.tryBeginHeartRateRecovery(HeartRateTransportRecoveryReason.AUTOMATIC))
 
         gate.reset()
-        assertNotNull(gate.tryBeginHeartRateRecovery(userInitiated = false))
-        assertNotNull(gate.tryBeginHeartRateRecovery(userInitiated = true))
+        assertNotNull(gate.tryBeginHeartRateRecovery(HeartRateTransportRecoveryReason.AUTOMATIC))
+        assertNotNull(gate.tryBeginHeartRateRecovery(HeartRateTransportRecoveryReason.USER_RETRY))
+    }
+
+    @Test
+    fun `auto retry loop is unbounded and leaves failure budgets untouched`() {
+        val gate = ReconnectEpisodeGate(
+            maxAutomaticHeartRateRecoveryAttempts = 1,
+            maxManualHeartRateRecoveryAttempts = 2,
+        )
+
+        val autoRetries = (1..10).map {
+            assertNotNull(
+                gate.tryBeginHeartRateRecovery(HeartRateTransportRecoveryReason.AUTO_RETRY)
+            )
+        }
+        assertEquals((1..10).toList(), autoRetries.map { it.attempt })
+
+        // The unbounded loop must not have consumed the automatic or manual failure budgets.
+        assertNotNull(
+            gate.tryBeginHeartRateRecovery(HeartRateTransportRecoveryReason.AUTOMATIC)
+        )
+        val manual = assertNotNull(
+            gate.tryBeginHeartRateRecovery(HeartRateTransportRecoveryReason.USER_RETRY)
+        )
+        assertEquals(1, manual.attempt)
     }
 
     @Test

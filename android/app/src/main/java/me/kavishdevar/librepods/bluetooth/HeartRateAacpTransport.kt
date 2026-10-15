@@ -12,6 +12,7 @@ package me.kavishdevar.librepods.bluetooth
 
 import android.util.Log
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 
 internal enum class HeartRateAacpStage {
     CONNECT_SERVICE_0,
@@ -45,8 +46,9 @@ internal object HeartRateAacpFrames {
         0x04, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00,
     )
     private val ENABLE_HRM_STATE = byteArrayOf(
+        // HRM_STATE opcode 0x30 (verified at upstream a573241); 0x2D did not start the stream.
         0x04, 0x00, 0x04, 0x00,
-        0x09, 0x00, 0x2D, 0x01, 0x00, 0x00, 0x00,
+        0x09, 0x00, 0x30, 0x01, 0x00, 0x00, 0x00,
     )
     private val START_SENSOR_STREAM = byteArrayOf(
         0x04, 0x00, 0x04, 0x00,
@@ -122,15 +124,23 @@ internal class HeartRateAacpWriteGate {
 internal class HeartRateAacpTransport(
     private val writeGate: HeartRateAacpWriteGate = HeartRateAacpWriteGate(),
 ) {
+    /**
+     * The START sequence runs under [withTimeout] so a single attempt cannot hang the recovery
+     * loop forever if the shared AACP socket stops draining. The cap is generous (the 6-frame
+     * sequence with its inter-frame delays is ~900ms), so a healthy link always finishes well
+     * inside it; only a stalled write trips it. Note the timeout bounds the caller, not the
+     * underlying blocking output.write — a permanently stalled socket still needs the socket to be
+     * closed by the reconnect/watchdog path to be reclaimed, which [HeartRateSession] documents.
+     */
     suspend fun start(
         lease: AacpSocketLease,
         acquisitionIsCurrent: () -> Boolean,
-    ): Boolean {
+    ): Boolean = withTimeout(START_SEQUENCE_TIMEOUT_MILLIS) {
         for (step in HeartRateAacpFrames.startSequence()) {
-            if (!write(step.stage, step.packet, lease, acquisitionIsCurrent)) return false
+            if (!write(step.stage, step.packet, lease, acquisitionIsCurrent)) return@withTimeout false
             if (step.delayAfterMillis > 0L) delay(step.delayAfterMillis)
         }
-        return acquisitionIsCurrent() && BluetoothConnectionManager.isCurrent(lease)
+        acquisitionIsCurrent() && BluetoothConnectionManager.isCurrent(lease)
     }
 
     fun stop(
@@ -168,5 +178,6 @@ internal class HeartRateAacpTransport(
 
     private companion object {
         const val TAG = "HeartRateTransport"
+        const val START_SEQUENCE_TIMEOUT_MILLIS = 10_000L
     }
 }

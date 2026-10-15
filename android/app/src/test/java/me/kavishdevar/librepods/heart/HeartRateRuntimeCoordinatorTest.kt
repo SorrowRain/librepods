@@ -311,6 +311,199 @@ class HeartRateRuntimeCoordinatorTest {
     }
 
     @Test
+    fun `auto retry pauses while another device owns audio and resumes after release`() = runBlocking {
+        val fixture = Fixture(StartBehavior.FAILURE, StartBehavior.FAILURE)
+        fixture.sink.recoveryAccepted = true
+        val key = key(epoch = 1L)
+        fixture.connectSupportedAndWorn(key)
+        val failedAcquisition = requireNotNull(fixture.coordinator.session.value.acquisition)
+        fixture.sink.completeRecovery(failedAcquisition, accepted = false)
+        settle()
+
+        assertEquals(HeartRateSessionStatus.COULDNT_START, fixture.coordinator.session.value.status)
+        assertEquals(listOf(3_000L), fixture.delays.pendingDurations())
+
+        // Remote audio ownership cancels the pending retry immediately.
+        fixture.remoteAudioOwned = true
+        fixture.coordinator.refreshAutoRetryGate()
+        settle()
+        assertTrue(fixture.delays.pendingDurations().isEmpty())
+        assertTrue(fixture.coordinator.uiState.value.autoRetryPaused)
+        val eventsWhileOwned = fixture.sink.events.size
+        fixture.clock.nowMillis += 3_000L
+        settle()
+        assertEquals(eventsWhileOwned, fixture.sink.events.size)
+
+        // Releasing remote audio re-arms the retry loop.
+        fixture.remoteAudioOwned = false
+        fixture.coordinator.refreshAutoRetryGate()
+        settle()
+        assertFalse(fixture.coordinator.uiState.value.autoRetryPaused)
+        assertEquals(listOf(3_000L), fixture.delays.pendingDurations())
+
+        // Even without a refresh, a pending retry cannot fire while audio is owned.
+        fixture.remoteAudioOwned = true
+        fixture.clock.nowMillis += 3_000L
+        fixture.delays.resumeFirst(3_000L)
+        settle()
+        assertEquals(eventsWhileOwned, fixture.sink.events.size)
+        assertTrue(fixture.delays.pendingDurations().isEmpty())
+
+        fixture.remoteAudioOwned = false
+        fixture.coordinator.refreshAutoRetryGate()
+        settle()
+        assertEquals(listOf(3_000L), fixture.delays.pendingDurations())
+
+        fixture.sink.recoveryAccepted = true
+        fixture.clock.nowMillis += 3_000L
+        fixture.delays.resumeFirst(3_000L)
+        settle()
+        assertTrue(fixture.sink.events.any { it == "recover-heart-2-auto_retry" })
+        assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
+        val retriedAcquisition = requireNotNull(fixture.coordinator.session.value.acquisition)
+        fixture.sink.completeRecovery(retriedAcquisition, accepted = true)
+        settle()
+        assertEquals(3, fixture.sink.starts.size)
+        fixture.close()
+    }
+
+    @Test
+    fun `auto retry toggle stops the loop while manual retry still works`() = runBlocking {
+        val fixture = Fixture(StartBehavior.FAILURE, StartBehavior.FAILURE)
+        fixture.sink.recoveryAccepted = true
+        val key = key(epoch = 1L)
+        fixture.connectSupportedAndWorn(key)
+        val failedAcquisition = requireNotNull(fixture.coordinator.session.value.acquisition)
+        fixture.sink.completeRecovery(failedAcquisition, accepted = false)
+        settle()
+        assertEquals(HeartRateSessionStatus.COULDNT_START, fixture.coordinator.session.value.status)
+        assertEquals(listOf(3_000L), fixture.delays.pendingDurations())
+
+        fixture.autoRetryEnabled = false
+        fixture.coordinator.refreshAutoRetryGate()
+        settle()
+        assertTrue(fixture.delays.pendingDurations().isEmpty())
+        assertFalse(fixture.coordinator.uiState.value.autoRetryPaused)
+        fixture.clock.nowMillis += 3_000L
+        settle()
+        assertEquals(2, fixture.sink.starts.size)
+
+        fixture.sink.recoveryAccepted = true
+        fixture.coordinator.retry()
+        settle()
+        assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
+        val retriedAcquisition = requireNotNull(fixture.coordinator.session.value.acquisition)
+        fixture.sink.completeRecovery(retriedAcquisition, accepted = true)
+        settle()
+        assertEquals(3, fixture.sink.starts.size)
+        fixture.close()
+    }
+
+    @Test
+    fun `manual retry stays available while another device owns audio`() = runBlocking {
+        val fixture = Fixture(StartBehavior.FAILURE, StartBehavior.FAILURE)
+        fixture.sink.recoveryAccepted = true
+        val key = key(epoch = 1L)
+        fixture.connectSupportedAndWorn(key)
+        val failedAcquisition = requireNotNull(fixture.coordinator.session.value.acquisition)
+        fixture.sink.completeRecovery(failedAcquisition, accepted = false)
+        settle()
+        assertEquals(HeartRateSessionStatus.COULDNT_START, fixture.coordinator.session.value.status)
+
+        fixture.remoteAudioOwned = true
+        fixture.coordinator.refreshAutoRetryGate()
+        settle()
+        assertTrue(fixture.delays.pendingDurations().isEmpty())
+
+        fixture.sink.recoveryAccepted = true
+        fixture.coordinator.retry()
+        settle()
+        assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
+        val retriedAcquisition = requireNotNull(fixture.coordinator.session.value.acquisition)
+        fixture.sink.completeRecovery(retriedAcquisition, accepted = true)
+        settle()
+        assertEquals(3, fixture.sink.starts.size)
+        fixture.close()
+    }
+
+    @Test
+    fun `start sequence timeout restarts once then fails instead of hanging`() = runBlocking {
+        val fixture = Fixture(StartBehavior.SUSPEND, StartBehavior.SUSPEND)
+        val key = key(epoch = 1L)
+        fixture.connectSupportedAndWorn(key)
+        settle()
+
+        val firstStart = fixture.sink.starts.single()
+        assertEquals(listOf(8_000L), fixture.delays.pendingDurations())
+
+        fixture.clock.nowMillis = 8_000L
+        fixture.delays.resumeFirst(8_000L)
+        settle()
+
+        assertTrue(firstStart.cancelled)
+        assertEquals(2, fixture.sink.starts.size)
+        assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
+        assertEquals(listOf(8_000L), fixture.delays.pendingDurations())
+
+        fixture.clock.nowMillis = 16_000L
+        fixture.delays.resumeFirst(8_000L)
+        settle()
+
+        assertEquals(HeartRateSessionStatus.COULDNT_START, fixture.coordinator.session.value.status)
+        assertTrue(fixture.sink.events.any { it == "recover-heart-2-automatic" })
+        assertEquals(listOf(3_000L), fixture.delays.pendingDurations())
+        fixture.close()
+    }
+
+    @Test
+    fun `auto retry backs off exponentially while repeatedly rejected and resets after recovery`() =
+        runBlocking {
+            val fixture = Fixture(StartBehavior.FAILURE, StartBehavior.FAILURE, StartBehavior.SUCCESS)
+            fixture.sink.recoveryAccepted = true
+            val key = key(epoch = 1L)
+            fixture.connectSupportedAndWorn(key)
+            val failed = requireNotNull(fixture.coordinator.session.value.acquisition)
+            // The first start failed and its restart failed too, so the session sits in
+            // COULDNT_START with the auto-retry loop armed at the base quiet period. Reject the
+            // recovery so no quiet-period START is pending.
+            fixture.sink.completeRecovery(failed, accepted = false)
+            settle()
+            assertEquals(HeartRateSessionStatus.COULDNT_START, fixture.coordinator.session.value.status)
+            assertEquals(listOf(3_000L), fixture.delays.pendingDurations())
+            assertEquals(0, fixture.coordinator.uiState.value.autoRetryAttempt)
+
+            // Fire the first auto retry; recovery is accepted -> RECONNECTING, then the transport
+            // reset is rejected again -> back to COULDNT_START with a grown quiet period.
+            fixture.clock.nowMillis += 3_000L
+            fixture.delays.resumeFirst(3_000L)
+            settle()
+            val firstRetry = requireNotNull(fixture.coordinator.session.value.acquisition)
+            assertTrue(
+                fixture.sink.events.any { it == "recover-heart-${firstRetry.acquisition}-auto_retry" },
+            )
+            assertEquals(HeartRateSessionStatus.RECONNECTING, fixture.coordinator.session.value.status)
+            fixture.sink.completeRecovery(firstRetry, accepted = false)
+            settle()
+            assertEquals(HeartRateSessionStatus.COULDNT_START, fixture.coordinator.session.value.status)
+            assertTrue(fixture.coordinator.uiState.value.autoRetryAttempt >= 1)
+
+            // The re-armed quiet period is longer than the base 3s (grown backoff).
+            val grownDelay = fixture.delays.pendingDurations().single()
+            assertTrue(grownDelay in 3_001L..15_000L, "expected grown backoff, got $grownDelay")
+
+            // Fire the second retry; recovery is accepted this time, so the START succeeds, the
+            // counter is cleared, and no further auto-retry is armed.
+            fixture.clock.nowMillis += grownDelay
+            fixture.delays.resumeFirst(grownDelay)
+            settle()
+            val secondRetry = requireNotNull(fixture.coordinator.session.value.acquisition)
+            fixture.sink.completeRecovery(secondRetry, accepted = true)
+            settle()
+            assertTrue(fixture.delays.pendingDurations().none { it == 3_000L })
+            fixture.close()
+        }
+
+    @Test
     fun `stale recovery callback cannot start heart rate on a replacement lease`() = runBlocking {
         val fixture = Fixture(StartBehavior.FAILURE, StartBehavior.FAILURE)
         fixture.sink.recoveryAccepted = true
@@ -498,6 +691,8 @@ class HeartRateRuntimeCoordinatorTest {
         val clock = FakeClock()
         val delays = ManualDelay()
         val sink = FakeSink(startBehaviors.toList())
+        var remoteAudioOwned = false
+        var autoRetryEnabled = true
         private val rootJob = SupervisorJob()
         private val scope = CoroutineScope(rootJob + Dispatchers.Unconfined)
         val coordinator = HeartRateRuntimeCoordinator(
@@ -505,6 +700,8 @@ class HeartRateRuntimeCoordinatorTest {
             sink = sink,
             elapsedRealtimeMillis = clock::now,
             suspendDelay = delays::await,
+            autoRetryEnabled = { autoRetryEnabled },
+            autoRetrySuppressed = { remoteAudioOwned },
         )
 
         suspend fun connectSupportedAndWorn(key: HrmSessionKey) {

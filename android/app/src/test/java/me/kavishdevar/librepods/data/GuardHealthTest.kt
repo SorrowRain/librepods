@@ -1,5 +1,7 @@
 package me.kavishdevar.librepods.data
 
+import me.kavishdevar.librepods.audio.AudioHandoffPhase
+
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -12,7 +14,8 @@ class GuardHealthTest {
         nativeLeaseAvailable: Boolean = true,
         localMacResolved: Boolean = true,
         aacpConnected: Boolean = true,
-        guardState: RemoteDeviceAudioGuardState = RemoteDeviceAudioGuardState.IDLE,
+        guardState: AudioHandoffPhase = AudioHandoffPhase.IDLE,
+        preferredRouteApplied: Boolean = true,
     ) = GuardHealth.evaluate(
         enabled = enabled,
         barrierState = barrierState,
@@ -21,6 +24,7 @@ class GuardHealthTest {
         localMacResolved = localMacResolved,
         aacpConnected = aacpConnected,
         guardState = guardState,
+        preferredRouteApplied = preferredRouteApplied,
     )
 
     @Test
@@ -128,6 +132,38 @@ class GuardHealthTest {
     }
 
     @Test
+    fun `registered barrier without preferred route degrades while a remote host owns audio`() {
+        val health = evaluate(
+            guardState = AudioHandoffPhase.REMOTE,
+            preferredRouteApplied = false,
+        )
+
+        assertEquals(GuardHealthLevel.DEGRADED, health.level)
+        assertEquals(
+            listOf(GuardHealthReason.PREFERRED_ROUTE_MISSING),
+            health.reasons,
+        )
+    }
+
+    @Test
+    fun `preferred route missing is not reported when the barrier is not protecting`() {
+        // IDLE and OFF states have barrierEnabled=false, so the silent-stall symptom cannot occur.
+        val idle = evaluate(
+            guardState = AudioHandoffPhase.IDLE,
+            preferredRouteApplied = false,
+        )
+        assertEquals(GuardHealthLevel.ACTIVE, idle.level)
+        assertEquals(emptyList(), idle.reasons)
+
+        val off = evaluate(
+            guardState = AudioHandoffPhase.DISCONNECTED,
+            preferredRouteApplied = false,
+        )
+        assertEquals(GuardHealthLevel.ACTIVE, off.level)
+        assertEquals(emptyList(), off.reasons)
+    }
+
+    @Test
     fun `inputs are carried through for the troubleshooting view`() {
         val health = evaluate(
             barrierState = "registered",
@@ -135,7 +171,7 @@ class GuardHealthTest {
             nativeLeaseAvailable = true,
             localMacResolved = true,
             aacpConnected = true,
-            guardState = RemoteDeviceAudioGuardState.REMOTE_ACTIVE,
+            guardState = AudioHandoffPhase.REMOTE,
         )
 
         assertEquals("registered", health.barrierState)
@@ -143,6 +179,6 @@ class GuardHealthTest {
         assertEquals(true, health.nativeLeaseAvailable)
         assertEquals(true, health.localMacResolved)
         assertEquals(true, health.aacpConnected)
-        assertEquals(RemoteDeviceAudioGuardState.REMOTE_ACTIVE, health.guardState)
+        assertEquals(AudioHandoffPhase.REMOTE, health.guardState)
     }
 }

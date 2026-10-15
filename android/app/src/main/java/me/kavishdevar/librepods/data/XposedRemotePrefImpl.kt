@@ -21,7 +21,7 @@ class XposedRemotePrefImpl: XposedRemotePref {
             .edit { putBoolean(key, value) }
     }
 
-    override fun setA2dpStartGuardLease(remainingMs: Long) {
+    override fun setA2dpStartGuardLease(remainingMs: Long): Long? {
         val clampedRemainingMs = A2dpStartGuardLease.clampRequestedRemainingMs(remainingMs)
         val bootId = A2dpStartGuardLease.currentBootId()
         val enabled = clampedRemainingMs > 0L && bootId != null
@@ -31,8 +31,8 @@ class XposedRemotePrefImpl: XposedRemotePref {
             0L
         }
 
-        synchronized(a2dpStartGuardLeaseWriteLock) {
-            val service = XposedServiceHolder.service ?: return
+        return synchronized(a2dpStartGuardLeaseWriteLock) {
+            val service = XposedServiceHolder.service ?: return null
             val preferences = service.getRemotePreferences(REMOTE_PREFERENCES_NAME)
             val currentRevision = preferences.getLong(A2dpStartGuardLease.REVISION_KEY, 0L)
             val writingRevision = if (currentRevision % 2L == 0L) {
@@ -45,7 +45,7 @@ class XposedRemotePrefImpl: XposedRemotePref {
                 .commit()
             if (!markedWriting) {
                 Log.e(TAG, "Failed to mark A2DP StartStream guard lease update")
-                return
+                return null
             }
             val committed = preferences
                 .edit()
@@ -60,6 +60,7 @@ class XposedRemotePrefImpl: XposedRemotePref {
             if (!committed) {
                 Log.e(TAG, "Failed to commit A2DP StartStream guard lease")
             }
+            if (committed) writingRevision + 1L else null
         }
     }
 

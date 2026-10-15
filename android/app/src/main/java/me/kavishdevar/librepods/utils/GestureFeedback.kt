@@ -80,7 +80,7 @@ class GestureFeedback(context: Context) {
             Log.d(TAG, "Sounds loaded")
             soundsLoaded.set(true)
 
-            soundPool.play(soundId, 0.0f, 0.0f, 1, 0, 1.0f)
+            // Loading is silent. Even a zero-volume playback can open A2DP and steal remote audio.
         }
     }
 

@@ -101,7 +101,12 @@ fun HeartRateRoute(
     HeartRateScreen(
         state = state.heartRateState,
         healthConnectState = state.healthConnectExportState,
+        heartRateAutoRetryEnabled = state.heartRateAutoRetryEnabled,
+        heartRateRespectRemoteAudioGuard = state.heartRateRespectRemoteAudioGuard,
         onEnabledChanged = viewModel::setHeartRateMonitoringEnabled,
+        onAutoRetryEnabledChanged = viewModel::setHeartRateAutoRetryEnabled,
+        onRespectRemoteAudioGuardChanged =
+            viewModel::setHeartRateRespectRemoteAudioGuardEnabled,
         onRetry = viewModel::retryHeartRateMonitoring,
         onHealthConnectEnabledChanged = { enabled ->
             if (!enabled) {
@@ -134,7 +139,11 @@ fun HeartRateRoute(
 fun HeartRateScreen(
     state: HeartRateUiState,
     healthConnectState: HealthConnectExportState,
+    heartRateAutoRetryEnabled: Boolean,
+    heartRateRespectRemoteAudioGuard: Boolean,
     onEnabledChanged: (Boolean) -> Unit,
+    onAutoRetryEnabledChanged: (Boolean) -> Unit,
+    onRespectRemoteAudioGuardChanged: (Boolean) -> Unit,
     onRetry: () -> Unit,
     onHealthConnectEnabledChanged: (Boolean) -> Unit,
     onDetailedSamplesChanged: (Boolean) -> Unit,
@@ -172,6 +181,24 @@ fun HeartRateScreen(
             onCheckedChange = onEnabledChanged,
         )
 
+        if (state.supported && state.enabled) {
+            StyledToggle(
+                label = stringResource(R.string.heart_rate_auto_retry),
+                description = stringResource(R.string.heart_rate_auto_retry_description),
+                checked = heartRateAutoRetryEnabled,
+                onCheckedChange = onAutoRetryEnabledChanged,
+            )
+            StyledToggle(
+                label = stringResource(R.string.heart_rate_respect_remote_audio_guard),
+                description = stringResource(
+                    R.string.heart_rate_respect_remote_audio_guard_description
+                ),
+                checked = heartRateRespectRemoteAudioGuard,
+                enabled = heartRateAutoRetryEnabled,
+                onCheckedChange = onRespectRemoteAudioGuardChanged,
+            )
+        }
+
         if (!state.supported) {
             Text(
                 text = stringResource(R.string.heart_rate_unavailable),
@@ -186,6 +213,26 @@ fun HeartRateScreen(
             state.status == HeartRateUiStatus.COULDNT_START
         ) {
             Spacer(modifier = Modifier.height(12.dp))
+            if (state.autoRetryPaused) {
+                Text(
+                    text = stringResource(R.string.heart_rate_retry_paused_by_remote_audio),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            } else if (state.autoRetryAttempt > 0) {
+                Text(
+                    text = stringResource(
+                        R.string.heart_rate_retry_in_progress,
+                        state.autoRetryAttempt,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
             StyledButton(
                 onClick = onRetry,
                 backdrop = backdrop,
@@ -239,6 +286,17 @@ private fun HealthConnectControls(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
     )
+    if (state.droppedMeasurements > 0) {
+        Text(
+            text = stringResource(
+                R.string.health_connect_dropped_measurements,
+                state.droppedMeasurements,
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+        )
+    }
     StyledToggle(
         label = stringResource(R.string.health_connect_detailed_samples),
         description = stringResource(R.string.health_connect_detailed_samples_description),
@@ -380,7 +438,11 @@ private fun HeartRateScreenPreview() {
                 enabled = true,
                 status = HealthConnectExportStatus.ENABLED,
             ),
+            heartRateAutoRetryEnabled = true,
+            heartRateRespectRemoteAudioGuard = true,
             onEnabledChanged = {},
+            onAutoRetryEnabledChanged = {},
+            onRespectRemoteAudioGuardChanged = {},
             onRetry = {},
             onHealthConnectEnabledChanged = {},
             onDetailedSamplesChanged = {},

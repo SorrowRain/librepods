@@ -64,6 +64,8 @@ data class HealthConnectExportState(
     val enabled: Boolean = false,
     val status: HealthConnectExportStatus = HealthConnectExportStatus.UNAVAILABLE,
     val detailedSamples: Boolean = false,
+    /** Number of heart-rate measurements dropped by backpressure (never written). */
+    val droppedMeasurements: Long = 0,
 )
 
 internal enum class HealthConnectSdkAvailability {
@@ -260,15 +262,23 @@ class HealthConnectHeartRateExporter internal constructor(
         }
     }
 
+    private val droppedMeasurements = AtomicLong(0)
+
     internal fun accept(
         acquisitionIdentity: HeartRateExportAcquisitionIdentity,
         measurement: HeartRateMeasurement,
     ) {
         val epoch = activeConsentEpoch.get()
         if (!isConsentActive(epoch)) return
-        measurementChannel.trySend(
+        val result = measurementChannel.trySend(
             BufferedHeartRateMeasurement(epoch, acquisitionIdentity, measurement)
         )
+        if (result.isFailure) {
+            // Backpressure: the 128-slot channel is full (a stalled Health Connect write). Count
+            // the drop so the user is not silently losing medical data.
+            droppedMeasurements.incrementAndGet()
+            _state.value = _state.value.copy(droppedMeasurements = droppedMeasurements.get())
+        }
     }
 
     internal suspend fun acceptAndAwait(

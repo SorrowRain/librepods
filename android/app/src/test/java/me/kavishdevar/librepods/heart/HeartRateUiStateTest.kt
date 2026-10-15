@@ -117,6 +117,92 @@ class HeartRateUiStateTest {
     }
 
     @Test
+    fun `auto retry paused only surfaces for an enabled could-not-start session`() {
+        val key = key(epoch = 1L)
+        val eligibility = supportedEligibility(key)
+        val failed = HeartRateSessionState(
+            enabled = true,
+            status = HeartRateSessionStatus.COULDNT_START,
+            key = key,
+        )
+
+        val paused = HeartRateUiStateMapper.map(
+            eligibility = eligibility,
+            session = failed,
+            nowElapsedRealtimeMillis = 1_000L,
+            autoRetryPaused = true,
+        )
+        assertTrue(paused.autoRetryPaused)
+
+        val disabled = HeartRateUiStateMapper.map(
+            eligibility = eligibility,
+            session = failed.copy(enabled = false, status = HeartRateSessionStatus.OFF),
+            nowElapsedRealtimeMillis = 1_000L,
+            autoRetryPaused = true,
+        )
+        assertFalse(disabled.autoRetryPaused)
+
+        val live = HeartRateUiStateMapper.map(
+            eligibility = eligibility,
+            session = liveSession(key, bpm = 72, sampleTime = 1_000L),
+            nowElapsedRealtimeMillis = 1_000L,
+            autoRetryPaused = true,
+        )
+        assertFalse(live.autoRetryPaused)
+
+        val gateOpen = HeartRateUiStateMapper.map(
+            eligibility = eligibility,
+            session = failed,
+            nowElapsedRealtimeMillis = 1_000L,
+            autoRetryPaused = false,
+        )
+        assertFalse(gateOpen.autoRetryPaused)
+    }
+
+    @Test
+    fun `auto retry attempt only surfaces for an enabled could-not-start session`() {
+        val key = key(epoch = 1L)
+        val eligibility = supportedEligibility(key)
+        val failed = HeartRateSessionState(
+            enabled = true,
+            status = HeartRateSessionStatus.COULDNT_START,
+            key = key,
+        )
+
+        val retrying = HeartRateUiStateMapper.map(
+            eligibility = eligibility,
+            session = failed,
+            nowElapsedRealtimeMillis = 1_000L,
+            autoRetryAttempt = 3,
+        )
+        assertEquals(3, retrying.autoRetryAttempt)
+
+        val live = HeartRateUiStateMapper.map(
+            eligibility = eligibility,
+            session = liveSession(key, bpm = 72, sampleTime = 1_000L),
+            nowElapsedRealtimeMillis = 1_000L,
+            autoRetryAttempt = 3,
+        )
+        assertEquals(0, live.autoRetryAttempt)
+
+        val disabled = HeartRateUiStateMapper.map(
+            eligibility = eligibility,
+            session = failed.copy(enabled = false, status = HeartRateSessionStatus.OFF),
+            nowElapsedRealtimeMillis = 1_000L,
+            autoRetryAttempt = 3,
+        )
+        assertEquals(0, disabled.autoRetryAttempt)
+
+        val freshStart = HeartRateUiStateMapper.map(
+            eligibility = eligibility,
+            session = failed,
+            nowElapsedRealtimeMillis = 1_000L,
+            autoRetryAttempt = 0,
+        )
+        assertEquals(0, freshStart.autoRetryAttempt)
+    }
+
+    @Test
     fun `unsupported or disabled LIVE state cannot expose BPM`() {
         val key = key(epoch = 1L)
         val unsupported = HeartRateUiStateMapper.map(
